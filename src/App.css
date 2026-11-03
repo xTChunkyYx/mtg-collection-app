@@ -1,0 +1,1542 @@
+import React, {
+    useState, useEffect, useMemo, useRef
+}
+
+from 'react';
+import {
+    initializeApp
+}
+
+from 'firebase/app';
+import {
+    getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged
+}
+
+from 'firebase/auth';
+import {
+    getFirestore, collection, doc, onSnapshot, setDoc, addDoc, updateDoc, deleteDoc
+}
+
+from 'firebase/firestore';
+import {
+    Search, Plus, Upload, Download, ArrowLeftRight, Layers, BarChart3, Trash2, Edit3, Filter, Sparkles, DollarSign, RefreshCw, Check, X, ChevronDown, Shield, Info, FolderPlus, ArrowUpDown, Grid, List as ListIcon, PieChart
+}
+
+from 'lucide-react';
+
+// --- FIREBASE INITIALIZATION ---
+const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {
+    apiKey: "demo-api-key", authDomain: "demo-app.firebaseapp.com", projectId: "demo-app", storageBucket: "demo-app.appspot.com", messagingSenderId: "123456789", appId: "1:123456789:web:demo"
+}
+
+;
+
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'mtg-collection-app';
+
+// --- MANA COLOR MAP ---
+const COLOR_MAP = {
+    W:
+
+{
+    name: 'White', bg: 'bg-amber-100', text: 'text-amber-900', border: 'border-amber-300', symbol: '??'
+}
+
+,
+U: {
+    name: 'Blue', bg: 'bg-blue-900/60', text: 'text-blue-200', border: 'border-blue-500', symbol: '??'
+}
+
+,
+B: {
+    name: 'Black', bg: 'bg-zinc-800', text: 'text-zinc-200', border: 'border-zinc-600', symbol: '??'
+}
+
+,
+R: {
+    name: 'Red', bg: 'bg-red-950/80', text: 'text-red-200', border: 'border-red-600', symbol: '??'
+}
+
+,
+G: {
+    name: 'Green', bg: 'bg-emerald-950/80', text: 'text-emerald-200', border: 'border-emerald-600', symbol: '??'
+}
+
+,
+C: {
+    name: 'Colorless', bg: 'bg-slate-800', text: 'text-slate-300', border: 'border-slate-600', symbol: '??'
+}
+
+,
+M: {
+    name: 'Multicolor', bg: 'bg-gradient-to-r from-amber-900/40 via-purple-900/40 to-blue-900/40', text: 'text-amber-200', border: 'border-amber-500/50', symbol: '??'
+}
+
+}
+
+;
+
+// --- SAMPLE SEED DATA ---
+const SAMPLE_CARDS = [ {
+    id: 'sample-1', name: 'Black Lotus', setName: 'Unlimited Edition', setCode: '2ed', quantity: 1, isFoil: false, rarity: 'rare', type: 'Artifact', manaCost: '{0}', colors: ['C'], condition: 'Near Mint', price: 12500.00, imageUrl: 'https://cards.scryfall.io/large/front/b/d/bd8fa327-dd41-4737-8f19-2cf5eb1f7cdd.jpg'
+}
+
+,
+{
+    id: 'sample-2', name: 'Sol Ring', setName: 'Commander Masters', setCode: 'cmm', quantity: 4, isFoil: true, rarity: 'uncommon', type: 'Artifact', manaCost: '{1}', colors: ['C'], condition: 'Near Mint', price: 3.50, imageUrl: 'https://cards.scryfall.io/large/front/4/c/4c56ac47-8138-405c-b66b-4e6503c5825d.jpg'
+}
+
+,
+{
+    id: 'sample-3', name: 'Rhystic Study', setName: 'Wilds of Eldraine', setCode: 'woe', quantity: 2, isFoil: true, rarity: 'rare', type: 'Enchantment', manaCost: '{2}{U}', colors: ['U'], condition: 'Near Mint', price: 38.00, imageUrl: 'https://cards.scryfall.io/large/front/d/5/d5d55a29-0114-411a-a53b-e3c3b03f0b2f.jpg'
+}
+
+,
+{
+    id: 'sample-4', name: 'Lightning Bolt', setName: 'Masters 25', setCode: 'a25', quantity: 8, isFoil: false, rarity: 'common', type: 'Instant', manaCost: '{R}', colors: ['R'], condition: 'Lightly Played', price: 1.25, imageUrl: 'https://cards.scryfall.io/large/front/e/3/e3285e6b-3e79-4d7c-bf96-d920f973b122.jpg'
+}
+
+,
+{
+    id: 'sample-5', name: 'Doubling Season', setName: 'Wilds of Eldraine', setCode: 'woe', quantity: 1, isFoil: false, rarity: 'mythic', type: 'Enchantment', manaCost: '{4}{G}', colors: ['G'], condition: 'Near Mint', price: 42.00, imageUrl: 'https://cards.scryfall.io/large/front/1/c/1cdd8e69-5a99-41d7-83ce-1c5b9ec91cca.jpg'
+}
+
+,
+{
+    id: 'sample-6', name: 'Teferi\'s Protection', setName: 'Secret Lair Drop', setCode: 'sld', quantity: 2, isFoil: true, rarity: 'rare', type: 'Instant', manaCost: '{2}{W}', colors: ['W'], condition: 'Near Mint', price: 32.50, imageUrl: 'https://cards.scryfall.io/large/front/7/7/77f130c7-0138-4a1a-9f67-62d2c302dc48.jpg'
+}
+
+,
+{
+    id: 'sample-7', name: 'Demonic Tutor', setName: 'Ultimate Masters', setCode: 'uma', quantity: 1, isFoil: false, rarity: 'rare', type: 'Sorcery', manaCost: '{1}{B}', colors: ['B'], condition: 'Near Mint', price: 44.00, imageUrl: 'https://cards.scryfall.io/large/front/3/b/3b458488-d8fa-4e1b-b467-33d317056037.jpg'
+}
+
+,
+{
+    id: 'sample-8', name: 'Atraxa, Praetors\' Voice', setName: 'Commander Anthology Volume II', setCode: 'cm2', quantity: 1, isFoil: true, rarity: 'mythic', type: 'Legendary Creature — Angel Horror', manaCost: '{G}{W}{U}{B}', colors: ['M'], condition: 'Near Mint', price: 19.50, imageUrl: 'https://cards.scryfall.io/large/front/d/0/d0d33d52-3d28-4635-b985-51e126289259.jpg'
+}
+
+];
+
+export default function App() {
+    const [user, setUser] = useState(null);
+    const [activeTab, setActiveTab] = useState('collection');
+    // 'collection' | 'add' | 'csv' | 'trade' | 'analytics' const [cards, setCards] = useState([]);
+    const [trades, setTrades] = useState([]);
+    const [isLoading, setIsLoading] = useState(true);
+    const [notification, setNotification] = useState(null);
+    // --- FILTER & SEARCH STATE --- const [searchQuery, setSearchQuery] = useState('');
+    const [selectedColor, setSelectedColor] = useState('ALL');
+    const [selectedRarity, setSelectedRarity] = useState('ALL');
+    const [selectedType, setSelectedType] = useState('ALL');
+    const [viewMode, setViewMode] = useState('grid');
+    // 'grid' | 'list' const [sortBy, setSortBy] = useState('name');
+    // 'name', 'price', 'quantity', 'rarity' const [sortOrder, setSortOrder] = useState('asc');
+    // --- QUICK ADD STATE --- const [quickForm, setQuickForm] = useState({
+    name: '',
+    setName: '',
+    quantity: 1,
+    isFoil: false,
+    rarity: 'rare',
+    type: 'Creature',
+    manaCost: '{2}{R}',
+    condition: 'Near Mint',
+    price: 1.00
+  });
+    const [scryfallSuggestions, setScryfallSuggestions] = useState([]);
+    const [isSearchingScryfall, setIsSearchingScryfall] = useState(false);
+    // --- TRADE BUILDER STATE --- const [tradeOffering, setTradeOffering] = useState([]);
+    // [{ cardId, count }] const [tradeRequesting, setTradeRequesting] = useState([]);
+    // [{ name, price, quantity, foil }] const [customRequestInput, setCustomRequestInput] = useState({ name: '', price: '', count: 1, isFoil: false });
+    const [tradePartnerName, setTradePartnerName] = useState('');
+    // Notifications const showToast = (message, type = 'success') =>
+
+{
+    setNotification({ message, type });
+    setTimeout(() => setNotification(null), 3500);
+}
+
+;
+
+// --- AUTHENTICATION ---
+useEffect(() => {
+    const initAuth = async () => {
+      try {
+        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+          await signInWithCustomToken(auth, __initial_auth_token);
+        } else {
+          await signInAnonymously(auth);
+        }
+      } catch (err) {
+        console.error("Auth initialization error:", err);
+      }
+    };
+    initAuth();
+    const unsubscribe = onAuthStateChanged(auth, (u) => {
+      setUser(u);
+    });
+    return () => unsubscribe();
+  }, []);
+
+// --- FIRESTORE SUBSCRIPTIONS ---
+useEffect(() => {
+    if (!user) return;
+
+    // Direct Firestore paths adhering strictly to rules
+    const cardsColRef = collection(db, 'artifacts', appId, 'users', user.uid, 'cards');
+    const tradesColRef = collection(db, 'artifacts', appId, 'users', user.uid, 'trades');
+
+    const unsubCards = onSnapshot(
+      cardsColRef,
+      (snapshot) => {
+        const docsData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        // If empty on first load, offer sample load or set cards
+        setCards(docsData);
+        setIsLoading(false);
+      },
+      (err) => {
+        console.error("Error fetching cards:", err);
+        setIsLoading(false);
+      }
+    );
+
+    const unsubTrades = onSnapshot(
+      tradesColRef,
+      (snapshot) => {
+        const docsData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        setTrades(docsData);
+      },
+      (err) => {
+        console.error("Error fetching trades:", err);
+      }
+    );
+
+    return () => {
+      unsubCards();
+      unsubTrades();
+    };
+  }, [user]);
+
+// Load Seed / Demo Cards if collection is empty
+const handleLoadSampleCollection = async () = > {
+    if (!user) return;
+    setIsLoading(true);
+    try
+
+{
+    const cardsColRef = collection(db, 'artifacts', appId, 'users', user.uid, 'cards');
+    for (const card of SAMPLE_CARDS)
+
+{
+    const
+
+{
+    id, ...data
+}
+
+= card;
+await addDoc(cardsColRef, { ...data, updatedAt: new Date().toISOString() });
+}
+showToast("Sample MTG collection imported!");
+}
+
+catch (err) {
+    showToast("Failed to load sample data: " + err.message, "error");
+}
+
+finally {
+    setIsLoading(false);
+}
+
+}
+
+;
+
+// Scryfall Auto-Complete & Lookup
+useEffect(() => {
+    if (!quickForm.name || quickForm.name.length < 3) {
+      setScryfallSuggestions([]);
+      return;
+    }
+    const timer = setTimeout(async () => {
+      setIsSearchingScryfall(true);
+      try {
+        const res = await fetch(`https://api.scryfall.com/cards/autocomplete?q=${encodeURIComponent(quickForm.name)}`);
+        const data = await res.json();
+        if (data && data.data) {
+          setScryfallSuggestions(data.data.slice(0, 5));
+        }
+      } catch (e) {
+        console.warn("Scryfall lookup failed", e);
+      } finally {
+        setIsSearchingScryfall(false);
+      }
+    }, 300);
+
+    return () => clearTimeout(timer);
+  }, [quickForm.name]);
+
+const handleSelectScryfallCard = async (cardName) = > {
+    setScryfallSuggestions([]);
+    setIsSearchingScryfall(true);
+    try
+
+{
+    const res = await fetch(`https://api.scryfall.com/cards/named?exact=${encodeURIComponent(cardName)}`);
+    const cardData = await res.json();
+    if (cardData)
+
+{
+    let colors = cardData.colors || [];
+    if (colors.length > 1) colors = ['M'];
+    else if (colors.length === 0) colors = ['C'];
+    const priceUSD = cardData.prices?.usd || cardData.prices?.usd_foil || "1.00";
+    const img = cardData.image_uris?.normal || cardData.card_faces?.[0]?.image_uris?.normal || '';
+    setQuickForm(prev => ({
+          ...prev,
+          name: cardData.name,
+          setName: cardData.set_name || prev.setName,
+          setCode: cardData.set || '',
+          rarity: cardData.rarity || 'common',
+          type: cardData.type_line || 'Unknown',
+          manaCost: cardData.mana_cost || '',
+          colors: colors,
+          price: parseFloat(priceUSD) || 1.0,
+          imageUrl: img
+        }));
+}
+
+}
+
+catch (e) {
+    showToast("Could not fetch detailed Scryfall data", "error");
+}
+
+finally {
+    setIsSearchingScryfall(false);
+}
+
+}
+
+;
+
+// Add / Merge Card logic
+const handleSaveCard = async (cardObj) = > {
+    if (!user) return;
+    try
+
+{
+    const cardsColRef = collection(db, 'artifacts', appId, 'users', user.uid, 'cards');
+    // Check for matching existing card in collection to MERGE quantity const existing = cards.find(c => c.name.toLowerCase() === cardObj.name.toLowerCase() && c.setName.toLowerCase() === (cardObj.setName || '').toLowerCase() && Boolean(c.isFoil) === Boolean(cardObj.isFoil) );
+    if (existing)
+
+{
+    // Merge quantities const docRef = doc(db, 'artifacts', appId, 'users', user.uid, 'cards', existing.id);
+    await updateDoc(docRef, {
+          quantity: Number(existing.quantity) + Number(cardObj.quantity || 1),
+          price: cardObj.price || existing.price,
+          updatedAt: new Date().toISOString()
+        });
+    showToast(`Merged +${cardObj.quantity || 1} copies into existing "${existing.name}"`);
+}
+
+else {
+    // Insert new let colors = cardObj.colors || ['C'];
+    if (!cardObj.colors && cardObj.manaCost)
+
+{
+    colors = parseColorsFromManaCost(cardObj.manaCost);
+}
+
+await addDoc(cardsColRef, {
+          name: cardObj.name,
+          setName: cardObj.setName || 'Unknown Set',
+          setCode: cardObj.setCode || '',
+          quantity: Number(cardObj.quantity) || 1,
+          isFoil: Boolean(cardObj.isFoil),
+          rarity: (cardObj.rarity || 'common').toLowerCase(),
+          type: cardObj.type || 'Card',
+          manaCost: cardObj.manaCost || '',
+          colors: colors,
+          condition: cardObj.condition || 'Near Mint',
+          price: Number(cardObj.price) || 0.50,
+          imageUrl: cardObj.imageUrl || '',
+          createdAt: new Date().toISOString()
+        });
+showToast(`Added "${cardObj.name}" to collection!`);
+}
+}
+
+catch (err) {
+    console .error("Save card error:", err);
+    showToast("Failed to save card: " + err.message, "error");
+}
+
+}
+
+;
+
+const parseColorsFromManaCost = (costStr) = > {
+    if (!costStr) return ['C'];
+    const cols = new Set();
+    if (costStr.includes('W')) cols.add('W');
+    if (costStr.includes('U')) cols.add('U');
+    if (costStr.includes('B')) cols.add('B');
+    if (costStr.includes('R')) cols.add('R');
+    if (costStr.includes('G')) cols.add('G');
+    if (cols.size > 1) return ['M'];
+    if (cols.size === 1) return Array.from(cols);
+    return ['C'];
+}
+
+;
+
+// Delete Card
+const handleDeleteCard = async (cardId) = > {
+    if (!user) return;
+    try
+
+{
+    const docRef = doc(db, 'artifacts', appId, 'users', user.uid, 'cards', cardId);
+    await deleteDoc(docRef);
+    showToast("Card removed from collection");
+}
+
+catch (err) {
+    showToast("Failed to delete card", "error");
+}
+
+}
+
+;
+
+// Adjust Quantity Directly
+const handleUpdateQuantity = async (card, delta) = > {
+    if (!user) return;
+    const newQty = card.quantity + delta;
+    if (newQty <= 0)
+
+{
+    handleDeleteCard(card.id);
+    return;
+}
+
+try {
+    const docRef = doc(db, 'artifacts', appId, 'users', user.uid, 'cards', card.id);
+    await updateDoc(docRef, { quantity: newQty });
+}
+
+catch (err) {
+    showToast("Failed to update quantity", "error");
+}
+
+}
+
+;
+
+// --- CSV PARSER & MERGER ---
+const handleCSVUpload = async (event) = > {
+    const file = event.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader .onload = async (e) =>
+
+{
+    const text = e.target.result;
+    const lines = text.split(/\r\n|\n/);
+    if (lines.length < 2)
+
+{
+    showToast("CSV file is empty or invalid format", "error");
+    return;
+}
+
+// Simple CSV Header mapping parser
+const headers = lines[0].split(',').map(h => h.trim().toLowerCase().replace(/"/g, '')); let importedCount = 0;
+for (let i = 1; i < lines.length; i++) {
+    if (!lines[i].trim()) continue;
+    // Handle quoted values simple regex const values = lines[i].match(/(".*?"|[^",\s]+)(?=\s*,|\s*$)/g) || lines[i].split(',');
+        const cleanVals = values.map(v => v.trim().replace(/^"|"$/g, ''));
+
+        const getVal = (possibleNames) => {
+          for (let name of possibleNames) {
+            const idx = headers.findIndex(h => h.includes(name));
+            if (idx !== -1 && cleanVals[idx] !== undefined) return cleanVals[idx];
+          }
+          return '';
+        };
+
+        const name = getVal(['name', 'card']);
+        if (!name) continue;
+
+        const setName = getVal(['set', 'edition']) || 'Core Set';
+        const quantity = parseInt(getVal(['qty', 'quantity', 'count']) || '1', 10);
+        const foilStr = getVal(['foil', 'finish']).toLowerCase();
+        const isFoil = foilStr.includes('foil') || foilStr === 'yes' || foilStr === 'true';
+        const rarity = getVal(['rarity']) || 'common';
+        const type = getVal(['type']) || 'Unknown';
+        const manaCost = getVal(['cost', 'mana']);
+        const condition = getVal(['condition']) || 'Near Mint';
+        const price = parseFloat(getVal(['price', 'usd', 'value']) || '0.50');
+
+        await handleSaveCard({
+          name,
+          setName,
+          quantity: isNaN(quantity) ? 1 : quantity,
+          isFoil,
+          rarity,
+          type,
+          manaCost,
+          condition,
+          price: isNaN(price) ? 0.50 : price
+        });
+        importedCount++;
+}
+
+showToast(`Successfully processed CSV! Merged/Added ${importedCount} card entries.`);
+}
+;
+reader.readAsText(file);
+event.target.value = ''; // Reset input
+}
+
+;
+
+// CSV Export
+const handleExportCSV = () = > {
+    if (cards.length === 0)
+
+{
+    showToast("No cards in collection to export!", "error");
+    return;
+}
+
+const headers = ["Card Name", "Set Name", "Quantity", "Foil", "Rarity", "Type", "Mana Cost", "Condition", "Price USD"];
+const rows = cards.map(c => [
+      `"${c.name.replace(/"/g, '""')
+}
+"`,
+`"${c.setName.replace(/"/g, '""')
+}
+"`,
+c.quantity,
+c.isFoil ? "Foil" : "Normal",
+c.rarity,
+`"${c.type}"`,
+`"${c.manaCost || ''}"`,
+c.condition,
+c.price
+]);
+
+const csvContent = "data:text/csv;charset=utf-8," + [headers.join(','), ...rows.map(e => e.join(','))].join('\n');
+const encodedUri = encodeURI(csvContent);
+const link = document.createElement("a");
+link.setAttribute("href", encodedUri);
+link.setAttribute("download", `MTG_Collection_${new Date().toISOString().slice(0, 10)}.csv`);
+document.body.appendChild(link);
+link.click();
+document.body.removeChild(link);
+}
+
+;
+
+// --- FILTERED & SORTED CARDS ---
+const filteredCards = useMemo(() => {
+    return cards.filter(card => {
+      const matchesSearch = card.name.toLowerCase().includes(searchQuery.toLowerCase()) || 
+                            card.setName.toLowerCase().includes(searchQuery.toLowerCase()) ||
+                            card.type.toLowerCase().includes(searchQuery.toLowerCase());
+      
+      const matchesRarity = selectedRarity === 'ALL' || card.rarity.toLowerCase() === selectedRarity.toLowerCase();
+      
+      const cardColors = card.colors || parseColorsFromManaCost(card.manaCost);
+      const matchesColor = selectedColor === 'ALL' || cardColors.includes(selectedColor);
+      
+      const matchesType = selectedType === 'ALL' || card.type.toLowerCase().includes(selectedType.toLowerCase());
+
+      return matchesSearch && matchesRarity && matchesColor && matchesType;
+    }).sort((a, b) => {
+      let compA = a[sortBy];
+      let compB = b[sortBy];
+
+      if (typeof compA === 'string') compA = compA.toLowerCase();
+      if (typeof compB === 'string') compB = compB.toLowerCase();
+
+      if (compA < compB) return sortOrder === 'asc' ? -1 : 1;
+      if (compA > compB) return sortOrder === 'asc' ? 1 : -1;
+      return 0;
+    });
+  }, [cards, searchQuery, selectedRarity, selectedColor, selectedType, sortBy, sortOrder]);
+
+// --- COLLECTION METRICS ---
+const metrics = useMemo(() => {
+    let totalCards = 0;
+    let totalValue = 0;
+    let foilCount = 0;
+    const colorBreakdown = { W: 0, U: 0, B: 0, R: 0, G: 0, C: 0, M: 0 };
+    const rarityBreakdown = { common: 0, uncommon: 0, rare: 0, mythic: 0 };
+
+    cards.forEach(c => {
+      const qty = Number(c.quantity) || 1;
+      const price = Number(c.price) || 0;
+      totalCards += qty;
+      totalValue += qty * price;
+      if (c.isFoil) foilCount += qty;
+
+      const cols = c.colors || parseColorsFromManaCost(c.manaCost);
+      cols.forEach(col => {
+        if (colorBreakdown[col] !== undefined) colorBreakdown[col] += qty;
+      });
+
+      const r = (c.rarity || 'common').toLowerCase();
+      if (rarityBreakdown[r] !== undefined) rarityBreakdown[r] += qty;
+    });
+
+    return { totalCards, totalValue, foilCount, colorBreakdown, rarityBreakdown };
+  }, [cards]);
+
+// --- TRADE CALCULATIONS ---
+const tradeOfferTotal = useMemo(() => {
+    return tradeOffering.reduce((sum, item) => {
+      const card = cards.find(c => c.id === item.cardId);
+      return sum + (card ? card.price * item.count : 0);
+    }, 0);
+  }, [tradeOffering, cards]);
+
+const tradeRequestTotal = useMemo(() => {
+    return tradeRequesting.reduce((sum, item) => {
+      return sum + (Number(item.price) * Number(item.count || 1));
+    }, 0);
+  }, [tradeRequesting]);
+
+const tradeDifference = tradeOfferTotal - tradeRequestTotal;
+
+const handleSaveTradeProposal = async () = > {
+    if (!user) return;
+    if (tradeOffering.length === 0 && tradeRequesting.length === 0)
+
+{
+    showToast("Add cards to trade before saving proposal", "error");
+    return;
+}
+
+try {
+    const tradesColRef = collection(db, 'artifacts', appId, 'users', user.uid, 'trades');
+    await addDoc(tradesColRef, {
+        partnerName: tradePartnerName || 'Anonymous Trader',
+        offeredCards: tradeOffering.map(o => {
+          const c = cards.find(card => card.id === o.cardId);
+          return { name: c?.name || 'Card', count: o.count, price: c?.price || 0, isFoil: c?.isFoil };
+        }),
+        requestedCards: tradeRequesting,
+        offerTotal: tradeOfferTotal,
+        requestTotal: tradeRequestTotal,
+        difference: tradeDifference,
+        createdAt: new Date().toISOString()
+      });
+    showToast("Trade proposal saved!");
+    setTradeOffering([]);
+    setTradeRequesting([]);
+    setTradePartnerName('');
+}
+
+catch (err) {
+    showToast("Failed to save trade: " + err.message, "error");
+}
+
+}
+;
+
+return (
+    <div className="min-h-screen bg-slate-950 text-slate-100 font-sans selection:bg-purple-600 selection:text-white pb-12">
+      {/* Toast Notification */}
+      {notification && (
+        <div className={`fixed bottom-6 right-6 z-50 flex items-center gap-3 px-4 py-3 rounded-xl shadow-2xl backdrop-blur-md border ${
+          notification.type === 'error' ? 'bg-red-950/90 border-red-500 text-red-200' : 'bg-emerald-950/90 border-emerald-500 text-emerald-200'
+        } transition-all duration-300 animate-bounce`}>
+          {notification.type === 'error' ? <Info className="w-5 h-5" /> : <Check className="w-5 h-5" />}
+          <span className="text-sm font-medium">{notification.message}</span>
+        </div>
+      )}
+
+      {/* Header / Navbar */}
+      <header className="sticky top-0 z-40 border-b border-slate-800 bg-slate-900/80 backdrop-blur-md">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+          <div className="flex items-center justify-between h-16">
+            
+            {/* Logo / Title */}
+            <div className="flex items-center gap-3">
+              <div className="p-2 bg-gradient-to-tr from-purple-600 to-indigo-500 rounded-xl shadow-lg shadow-purple-500/20">
+                <Sparkles className="w-6 h-6 text-white" />
+              </div>
+              <div>
+                <h1 className="font-bold text-lg tracking-wider text-transparent bg-clip-text bg-gradient-to-r from-purple-400 via-amber-200 to-indigo-300">
+                  MYTHIC VAULT
+                </h1>
+                <p className="text-xs text-slate-400">MTG Collection & Trade Hub</p>
+              </div>
+            </div>
+
+            {/* Navigation Tabs */}
+            <nav className="flex items-center gap-1 sm:gap-2">
+              <button
+                onClick={() => setActiveTab('collection')}
+                className={`flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-all ${
+                  activeTab === 'collection' ? 'bg-purple-600/30 text-purple-300 border border-purple-500/50' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'
+                }`}
+              >
+                <Layers className="w-4 h-4" />
+                <span className="hidden sm:inline">Collection</span>
+              </button>
+
+              <button
+                onClick={() => setActiveTab('add')}
+                className={`flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-all ${
+                  activeTab === 'add' ? 'bg-purple-600/30 text-purple-300 border border-purple-500/50' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'
+                }`}
+              >
+                <Plus className="w-4 h-4" />
+                <span className="hidden sm:inline">Quick Add</span>
+              </button>
+
+              <button
+                onClick={() => setActiveTab('csv')}
+                className={`flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-all ${
+                  activeTab === 'csv' ? 'bg-purple-600/30 text-purple-300 border border-purple-500/50' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'
+                }`}
+              >
+                <Upload className="w-4 h-4" />
+                <span className="hidden sm:inline">CSV Tools</span>
+              </button>
+
+              <button
+                onClick={() => setActiveTab('trade')}
+                className={`flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-all ${
+                  activeTab === 'trade' ? 'bg-purple-600/30 text-purple-300 border border-purple-500/50' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'
+                }`}
+              >
+                <ArrowLeftRight className="w-4 h-4" />
+                <span className="hidden sm:inline">Trade Builder</span>
+              </button>
+
+              <button
+                onClick={() => setActiveTab('analytics')}
+                className={`flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-all ${
+                  activeTab === 'analytics' ? 'bg-purple-600/30 text-purple-300 border border-purple-500/50' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'
+                }`}
+              >
+                <BarChart3 className="w-4 h-4" />
+                <span className="hidden sm:inline">Stats</span>
+              </button>
+            </nav>
+          </div>
+        </div>
+      </header>
+
+      {/* Main Container */}
+      <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 mt-6">
+
+        {/* Top Summary Stats Bar */}
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+          <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-4 backdrop-blur-sm flex items-center justify-between">
+            <div>
+              <p className="text-xs uppercase tracking-wider text-slate-400 font-medium">Total Cards</p>
+              <h3 className="text-2xl font-bold text-white mt-1">{metrics.totalCards}</h3>
+            </div>
+            <div className="p-3 bg-indigo-500/10 border border-indigo-500/20 rounded-xl">
+              <Layers className="w-5 h-5 text-indigo-400" />
+            </div>
+          </div>
+
+          <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-4 backdrop-blur-sm flex items-center justify-between">
+            <div>
+              <p className="text-xs uppercase tracking-wider text-slate-400 font-medium">Collection Value</p>
+              <h3 className="text-2xl font-bold text-amber-400 mt-1">${metrics.totalValue.toFixed(2)}</h3>
+            </div>
+            <div className="p-3 bg-amber-500/10 border border-amber-500/20 rounded-xl">
+              <DollarSign className="w-5 h-5 text-amber-400" />
+            </div>
+          </div>
+
+          <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-4 backdrop-blur-sm flex items-center justify-between">
+            <div>
+              <p className="text-xs uppercase tracking-wider text-slate-400 font-medium">Foils</p>
+              <h3 className="text-2xl font-bold text-purple-300 mt-1">{metrics.foilCount}</h3>
+            </div>
+            <div className="p-3 bg-purple-500/10 border border-purple-500/20 rounded-xl">
+              <Sparkles className="w-5 h-5 text-purple-400" />
+            </div>
+          </div>
+
+          <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-4 backdrop-blur-sm flex items-center justify-between">
+            <div>
+              <p className="text-xs uppercase tracking-wider text-slate-400 font-medium">Unique Titles</p>
+              <h3 className="text-2xl font-bold text-emerald-400 mt-1">{cards.length}</h3>
+            </div>
+            <div className="p-3 bg-emerald-500/10 border border-emerald-500/20 rounded-xl">
+              <FolderPlus className="w-5 h-5 text-emerald-400" />
+            </div>
+          </div>
+        </div>
+
+        {/* Dynamic Main View */}
+        {activeTab === 'collection' && (
+          <div className="space-y-6">
+            
+            {/* Search & Filters Control Bar */}
+            <div className="bg-slate-900/80 border border-slate-800 rounded-xl p-4 backdrop-blur-md space-y-4">
+              <div className="flex flex-col md:flex-row items-stretch md:items-center gap-3">
+                
+                {/* Search Input */}
+                <div className="relative flex-1">
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                  <input
+                    type="text"
+                    placeholder="Search by name, set, or type..."
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    className="w-full bg-slate-950/80 border border-slate-700/80 rounded-lg pl-9 pr-4 py-2 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-purple-500 transition"
+                  />
+                  {searchQuery && (
+                    <button 
+                      onClick={() => setSearchQuery('')}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  )}
+                </div>
+
+                {/* Filters Dropdowns */}
+                <div className="flex flex-wrap items-center gap-2">
+                  
+                  {/* Color Filter */}
+                  <select
+                    value={selectedColor}
+                    onChange={(e) => setSelectedColor(e.target.value)}
+                    className="bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-300 focus:outline-none focus:border-purple-500"
+                  >
+                    <option value="ALL">All Colors</option>
+                    <option value="W">White ??</option>
+                    <option value="U">Blue ??</option>
+                    <option value="B">Black ??</option>
+                    <option value="R">Red ??</option>
+                    <option value="G">Green ??</option>
+                    <option value="C">Colorless ??</option>
+                    <option value="M">Multicolor ??</option>
+                  </select>
+
+                  {/* Rarity Filter */}
+                  <select
+                    value={selectedRarity}
+                    onChange={(e) => setSelectedRarity(e.target.value)}
+                    className="bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-300 focus:outline-none focus:border-purple-500"
+                  >
+                    <option value="ALL">All Rarities</option>
+                    <option value="common">Common</option>
+                    <option value="uncommon">Uncommon</option>
+                    <option value="rare">Rare</option>
+                    <option value="mythic">Mythic</option>
+                  </select>
+
+                  {/* Sort Field */}
+                  <select
+                    value={sortBy}
+                    onChange={(e) => setSortBy(e.target.value)}
+                    className="bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-300 focus:outline-none focus:border-purple-500"
+                  >
+                    <option value="name">Sort by Name</option>
+                    <option value="price">Sort by Price</option>
+                    <option value="quantity">Sort by Quantity</option>
+                    <option value="rarity">Sort by Rarity</option>
+                  </select>
+
+                  <button
+                    onClick={() => setSortOrder(prev => prev === 'asc' ? 'desc' : 'asc')}
+                    className="p-2 bg-slate-950 border border-slate-700 rounded-lg text-slate-300 hover:text-white"
+                    title="Toggle Sort Direction"
+                  >
+                    <ArrowUpDown className="w-4 h-4" />
+                  </button>
+
+                  {/* View Toggle */}
+                  <div className="flex bg-slate-950 p-1 border border-slate-800 rounded-lg">
+                    <button
+                      onClick={() => setViewMode('grid')}
+                      className={`p-1.5 rounded ${viewMode === 'grid' ? 'bg-purple-600 text-white' : 'text-slate-400 hover:text-white'}`}
+                    >
+                      <Grid className="w-4 h-4" />
+                    </button>
+                    <button
+                      onClick={() => setViewMode('list')}
+                      className={`p-1.5 rounded ${viewMode === 'list' ? 'bg-purple-600 text-white' : 'text-slate-400 hover:text-white'}`}
+                    >
+                      <ListIcon className="w-4 h-4" />
+                    </button>
+                  </div>
+                </div>
+
+              </div>
+            </div>
+
+            {/* Zero Cards Placeholder / Sample trigger */}
+            {cards.length === 0 && !isLoading && (
+              <div className="text-center py-16 bg-slate-900/40 border border-dashed border-slate-800 rounded-2xl p-8">
+                <div className="w-16 h-16 mx-auto mb-4 bg-purple-500/10 rounded-full flex items-center justify-center border border-purple-500/20">
+                  <Layers className="w-8 h-8 text-purple-400" />
+                </div>
+                <h3 className="text-lg font-semibold text-white">Your Collection is Empty</h3>
+                <p className="text-sm text-slate-400 max-w-md mx-auto mt-1 mb-6">
+                  Get started by importing a CSV of your MTG cards, adding them manually, or loading demo cards right now.
+                </p>
+                <div className="flex flex-wrap justify-center gap-3">
+                  <button
+                    onClick={handleLoadSampleCollection}
+                    className="px-4 py-2 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white rounded-xl text-sm font-medium shadow-lg shadow-purple-600/30 transition-all flex items-center gap-2"
+                  >
+                    <Sparkles className="w-4 h-4" />
+                    Load Sample Cards
+                  </button>
+                  <button
+                    onClick={() => setActiveTab('csv')}
+                    className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl text-sm font-medium transition"
+                  >
+                    Import CSV File
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Grid Display Mode */}
+            {viewMode === 'grid' && cards.length > 0 && (
+              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-5">
+                {filteredCards.map(card => {
+                  const cardColorStyle = COLOR_MAP[card.colors?.[0]] || COLOR_MAP.C;
+                  return (
+                    <div 
+                      key={card.id} 
+                      className={`group relative bg-slate-900/90 rounded-2xl border ${cardColorStyle.border} overflow-hidden shadow-xl transition-all duration-300 hover:-translate-y-1 hover:shadow-purple-500/10 flex flex-col justify-between`}
+                    >
+                      {/* Image Header */}
+                      <div className="relative aspect-[4/3] bg-slate-950 overflow-hidden flex items-center justify-center">
+                        {card.imageUrl ? (
+                          <img 
+                            src={card.imageUrl} 
+                            alt={card.name} 
+                            className="w-full h-full object-cover object-top transition duration-500 group-hover:scale-105"
+                          />
+                        ) : (
+                          <div className="text-center p-4">
+                            <span className="text-4xl">{cardColorStyle.symbol}</span>
+                            <p className="text-xs text-slate-500 mt-2">{card.type}</p>
+                          </div>
+                        )}
+
+                        {/* Foil Foil Effect Overlay */}
+                        {card.isFoil && (
+                          <div className="absolute inset-0 bg-gradient-to-tr from-yellow-500/20 via-pink-500/20 to-cyan-500/20 pointer-events-none border-2 border-amber-300/40 rounded-2xl" />
+                        )}
+
+                        {/* Quantity Badge */}
+                        <div className="absolute top-3 left-3 bg-slate-950/90 backdrop-blur-md px-2.5 py-1 rounded-full border border-slate-700 text-xs font-bold text-white flex items-center gap-1 shadow-md">
+                          <span>x{card.quantity}</span>
+                        </div>
+
+                        {/* Price Badge */}
+                        <div className="absolute top-3 right-3 bg-emerald-950/90 backdrop-blur-md px-2.5 py-1 rounded-full border border-emerald-500/50 text-xs font-bold text-emerald-300 shadow-md">
+                          ${(card.price * card.quantity).toFixed(2)}
+                        </div>
+                      </div>
+
+                      {/* Card Content Details */}
+                      <div className="p-4 flex-1 flex flex-col justify-between space-y-3">
+                        <div>
+                          <div className="flex items-start justify-between gap-2">
+                            <h4 className="font-bold text-base text-slate-100 group-hover:text-purple-300 transition-colors line-clamp-1">
+                              {card.name}
+                            </h4>
+                            {card.isFoil && (
+                              <span className="px-1.5 py-0.5 text-[10px] uppercase tracking-wider font-extrabold bg-amber-500/20 text-amber-300 border border-amber-500/40 rounded">
+                                Foil
+                              </span>
+                            )}
+                          </div>
+                          <p className="text-xs text-slate-400 mt-0.5">{card.setName}</p>
+                          <div className="flex items-center gap-2 mt-2">
+                            <span className={`text-[10px] font-semibold uppercase px-2 py-0.5 rounded border ${
+                              card.rarity === 'mythic' ? 'bg-amber-950/60 text-amber-400 border-amber-600' :
+                              card.rarity === 'rare' ? 'bg-yellow-950/60 text-yellow-300 border-yellow-600' :
+                              card.rarity === 'uncommon' ? 'bg-slate-800 text-slate-300 border-slate-600' :
+                              'bg-zinc-900 text-zinc-400 border-zinc-700'
+                            }`}>
+                              {card.rarity}
+                            </span>
+                            <span className="text-xs text-slate-400 truncate">{card.type}</span>
+                          </div>
+                        </div>
+
+                        {/* Control Buttons */}
+                        <div className="pt-3 border-t border-slate-800/80 flex items-center justify-between">
+                          <div className="flex items-center border border-slate-700 rounded-lg overflow-hidden bg-slate-950">
+                            <button
+                              onClick={() => handleUpdateQuantity(card, -1)}
+                              className="px-2 py-1 text-slate-400 hover:text-white hover:bg-slate-800"
+                            >
+                              -
+                            </button>
+                            <span className="px-2 text-xs font-medium text-slate-200">{card.quantity}</span>
+                            <button
+                              onClick={() => handleUpdateQuantity(card, 1)}
+                              className="px-2 py-1 text-slate-400 hover:text-white hover:bg-slate-800"
+                            >
+                              +
+                            </button>
+                          </div>
+
+                          <button
+                            onClick={() => handleDeleteCard(card.id)}
+                            className="p-1.5 text-slate-500 hover:text-red-400 hover:bg-red-950/30 rounded-lg transition"
+                            title="Remove Card"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            {/* List Display Mode */}
+            {viewMode === 'list' && cards.length > 0 && (
+              <div className="bg-slate-900/80 border border-slate-800 rounded-2xl overflow-hidden shadow-xl">
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left border-collapse">
+                    <thead>
+                      <tr className="border-b border-slate-800 bg-slate-950/60 text-xs text-slate-400 uppercase tracking-wider">
+                        <th className="py-3 px-4">Card Name</th>
+                        <th className="py-3 px-4">Set</th>
+                        <th className="py-3 px-4">Rarity</th>
+                        <th className="py-3 px-4">Type</th>
+                        <th className="py-3 px-4">Foil</th>
+                        <th className="py-3 px-4">Unit Price</th>
+                        <th className="py-3 px-4">Qty</th>
+                        <th className="py-3 px-4 text-right">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-800/60 text-sm">
+                      {filteredCards.map(card => (
+                        <tr key={card.id} className="hover:bg-slate-800/40 transition-colors">
+                          <td className="py-3 px-4 font-semibold text-slate-100">{card.name}</td>
+                          <td className="py-3 px-4 text-slate-400">{card.setName}</td>
+                          <td className="py-3 px-4">
+                            <span className="capitalize text-xs text-slate-300">{card.rarity}</span>
+                          </td>
+                          <td className="py-3 px-4 text-slate-400 text-xs">{card.type}</td>
+                          <td className="py-3 px-4">
+                            {card.isFoil ? (
+                              <span className="px-2 py-0.5 text-[10px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40 rounded">FOIL</span>
+                            ) : (
+                              <span className="text-slate-600 text-xs">—</span>
+                            )}
+                          </td>
+                          <td className="py-3 px-4 text-emerald-400 font-mono">${card.price.toFixed(2)}</td>
+                          <td className="py-3 px-4 font-bold text-white">{card.quantity}</td>
+                          <td className="py-3 px-4 text-right">
+                            <div className="flex items-center justify-end gap-2">
+                              <button
+                                onClick={() => handleUpdateQuantity(card, 1)}
+                                className="px-2 py-1 bg-slate-800 hover:bg-slate-700 text-xs rounded text-slate-200"
+                              >
+                                +1
+                              </button>
+                              <button
+                                onClick={() => handleDeleteCard(card.id)}
+                                className="p-1 text-slate-500 hover:text-red-400"
+                              >
+                                <Trash2 className="w-4 h-4" />
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+
+          </div>
+        )}
+
+        {/* Quick Card Add Tab */}
+        {activeTab === 'add' && (
+          <div className="max-w-2xl mx-auto bg-slate-900/90 border border-slate-800 rounded-2xl p-6 shadow-2xl backdrop-blur-md">
+            <h2 className="text-xl font-bold text-white mb-2 flex items-center gap-2">
+              <Plus className="w-5 h-5 text-purple-400" />
+              Continuous Card Entry
+            </h2>
+            <p className="text-xs text-slate-400 mb-6">
+              Type a card name to search the live Scryfall database or fill details manually. Duplicate entries automatically update existing quantity totals.
+            </p>
+
+            <form onSubmit={(e) => {
+              e.preventDefault();
+              handleSaveCard(quickForm);
+            }} className="space-y-4">
+              
+              {/* Card Name with Scryfall Autocomplete */}
+              <div className="relative">
+                <label className="block text-xs font-semibold text-slate-300 mb-1">Card Name *</label>
+                <input
+                  type="text"
+                  required
+                  placeholder="e.g. Sol Ring"
+                  value={quickForm.name}
+                  onChange={(e) => setQuickForm({ ...quickForm, name: e.target.value })}
+                  className="w-full bg-slate-950 border border-slate-700 rounded-xl px-4 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-purple-500"
+                />
+                
+                {/* Autocomplete Suggestions */}
+                {scryfallSuggestions.length > 0 && (
+                  <div className="absolute top-full left-0 right-0 mt-1 bg-slate-900 border border-slate-700 rounded-xl shadow-2xl z-50 overflow-hidden divide-y divide-slate-800">
+                    {scryfallSuggestions.map((sName, idx) => (
+                      <button
+                        type="button"
+                        key={idx}
+                        onClick={() => handleSelectScryfallCard(sName)}
+                        className="w-full text-left px-4 py-2 text-xs text-slate-200 hover:bg-purple-600/30 flex items-center justify-between"
+                      >
+                        <span>{sName}</span>
+                        <span className="text-[10px] text-purple-400 font-mono">Fetch Scryfall Art</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 mb-1">Set Name</label>
+                  <input
+                    type="text"
+                    placeholder="e.g. Commander Masters"
+                    value={quickForm.setName}
+                    onChange={(e) => setQuickForm({ ...quickForm, setName: e.target.value })}
+                    className="w-full bg-slate-950 border border-slate-700 rounded-xl px-4 py-2 text-sm text-slate-100 focus:outline-none focus:border-purple-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 mb-1">Estimated Unit Price ($)</label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    value={quickForm.price}
+                    onChange={(e) => setQuickForm({ ...quickForm, price: parseFloat(e.target.value) || 0 })}
+                    className="w-full bg-slate-950 border border-slate-700 rounded-xl px-4 py-2 text-sm text-slate-100 focus:outline-none focus:border-purple-500 font-mono"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 mb-1">Quantity</label>
+                  <input
+                    type="number"
+                    min="1"
+                    value={quickForm.quantity}
+                    onChange={(e) => setQuickForm({ ...quickForm, quantity: parseInt(e.target.value, 10) || 1 })}
+                    className="w-full bg-slate-950 border border-slate-700 rounded-xl px-4 py-2 text-sm text-slate-100 focus:outline-none focus:border-purple-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 mb-1">Rarity</label>
+                  <select
+                    value={quickForm.rarity}
+                    onChange={(e) => setQuickForm({ ...quickForm, rarity: e.target.value })}
+                    className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-sm text-slate-100 focus:outline-none focus:border-purple-500"
+                  >
+                    <option value="common">Common</option>
+                    <option value="uncommon">Uncommon</option>
+                    <option value="rare">Rare</option>
+                    <option value="mythic">Mythic</option>
+                  </select>
+                </div>
+
+                <div className="flex items-center pt-5">
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={quickForm.isFoil}
+                      onChange={(e) => setQuickForm({ ...quickForm, isFoil: e.target.checked })}
+                      className="w-4 h-4 rounded text-purple-600 bg-slate-950 border-slate-700 focus:ring-purple-500"
+                    />
+                    <span className="text-xs font-semibold text-amber-300">Foil Finish ?</span>
+                  </label>
+                </div>
+              </div>
+
+              <button
+                type="submit"
+                className="w-full mt-4 py-3 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white font-semibold text-sm rounded-xl shadow-lg shadow-purple-600/30 transition duration-200"
+              >
+                Add / Merge into Collection
+              </button>
+            </form>
+          </div>
+        )}
+
+        {/* CSV Import & Export Tab */}
+        {activeTab === 'csv' && (
+          <div className="max-w-3xl mx-auto space-y-6">
+            <div className="bg-slate-900/90 border border-slate-800 rounded-2xl p-6 shadow-2xl backdrop-blur-md">
+              <h2 className="text-xl font-bold text-white mb-2 flex items-center gap-2">
+                <Upload className="w-5 h-5 text-purple-400" />
+                Bulk CSV Card Import
+              </h2>
+              <p className="text-xs text-slate-400 mb-6">
+                Upload CSV exports from ManaBox, Archidekt, TCGPlayer, or custom spreadsheets. Any existing cards in your collection with matching names and finishes will automatically increment in quantity.
+              </p>
+
+              <div className="border-2 border-dashed border-slate-700 hover:border-purple-500 transition-colors rounded-xl p-8 text-center bg-slate-950/40">
+                <input
+                  type="file"
+                  accept=".csv"
+                  id="csvInput"
+                  onChange={handleCSVUpload}
+                  className="hidden"
+                />
+                <label htmlFor="csvInput" className="cursor-pointer block">
+                  <Upload className="w-10 h-10 text-slate-500 mx-auto mb-3" />
+                  <span className="text-sm font-semibold text-purple-300 hover:underline">
+                    Click to select CSV file
+                  </span>
+                  <p className="text-xs text-slate-500 mt-1">Accepts .csv files with standard columns</p>
+                </label>
+              </div>
+
+              <div className="mt-6 pt-6 border-t border-slate-800">
+                <h4 className="text-xs font-bold text-slate-300 uppercase tracking-wider mb-2">Supported Headers</h4>
+                <div className="flex flex-wrap gap-2 text-[11px] text-slate-400 font-mono">
+                  <span className="px-2 py-1 bg-slate-950 rounded border border-slate-800">Card Name</span>
+                  <span className="px-2 py-1 bg-slate-950 rounded border border-slate-800">Set Name</span>
+                  <span className="px-2 py-1 bg-slate-950 rounded border border-slate-800">Quantity</span>
+                  <span className="px-2 py-1 bg-slate-950 rounded border border-slate-800">Foil</span>
+                  <span className="px-2 py-1 bg-slate-950 rounded border border-slate-800">Price</span>
+                </div>
+              </div>
+            </div>
+
+            <div className="bg-slate-900/90 border border-slate-800 rounded-2xl p-6 shadow-2xl backdrop-blur-md flex items-center justify-between">
+              <div>
+                <h3 className="font-bold text-white">Backup & Export</h3>
+                <p className="text-xs text-slate-400 mt-0.5">Download your full collection as a standard CSV spreadsheet</p>
+              </div>
+              <button
+                onClick={handleExportCSV}
+                className="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-xl text-sm font-medium flex items-center gap-2 transition"
+              >
+                <Download className="w-4 h-4 text-purple-400" />
+                Export CSV
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Trade Builder & Calculator Tab */}
+        {activeTab === 'trade' && (
+          <div className="space-y-6">
+            
+            {/* Header & Trade Partner */}
+            <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-4 backdrop-blur-md flex flex-col sm:flex-row items-center justify-between gap-4">
+              <div>
+                <h2 className="text-xl font-bold text-white flex items-center gap-2">
+                  <ArrowLeftRight className="w-5 h-5 text-purple-400" />
+                  Interactive Trade Builder
+                </h2>
+                <p className="text-xs text-slate-400">Balance trade values between your offered cards and partner requests</p>
+              </div>
+
+              <div className="flex items-center gap-3 w-full sm:w-auto">
+                <input
+                  type="text"
+                  placeholder="Trader Name / Partner..."
+                  value={tradePartnerName}
+                  onChange={(e) => setTradePartnerName(e.target.value)}
+                  className="bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-purple-500 w-full sm:w-48"
+                />
+                <button
+                  onClick={handleSaveTradeProposal}
+                  className="px-4 py-2 bg-gradient-to-r from-purple-600 to-indigo-600 text-white text-xs font-semibold rounded-xl shadow-lg shadow-purple-600/30 hover:opacity-90 transition whitespace-nowrap"
+                >
+                  Save Proposal
+                </button>
+              </div>
+            </div>
+
+            {/* Split Trade Panels */}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              
+              {/* SIDE A: Offering from your Collection */}
+              <div className="bg-slate-900/90 border border-purple-500/30 rounded-2xl p-5 shadow-xl backdrop-blur-md flex flex-col justify-between">
+                <div>
+                  <div className="flex items-center justify-between mb-4 border-b border-slate-800 pb-3">
+                    <div>
+                      <h3 className="font-bold text-purple-300 text-base">You Offer (Your Vault)</h3>
+                      <p className="text-xs text-slate-400">Cards selected from your inventory</p>
+                    </div>
+                    <span className="text-lg font-bold font-mono text-emerald-400">
+                      ${tradeOfferTotal.toFixed(2)}
+                    </span>
+                  </div>
+
+                  {/* Selected items list */}
+                  {tradeOffering.length === 0 ? (
+                    <p className="text-xs text-slate-500 italic py-6 text-center">No cards selected from your collection yet.</p>
+                  ) : (
+                    <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
+                      {tradeOffering.map(item => {
+                        const card = cards.find(c => c.id === item.cardId);
+                        if (!card) return null;
+                        return (
+                          <div key={item.cardId} className="flex items-center justify-between p-2.5 bg-slate-950/80 rounded-xl border border-slate-800 text-xs">
+                            <div>
+                              <span className="font-semibold text-slate-100">{card.name}</span>
+                              <span className="text-slate-400 ml-2">(${card.price.toFixed(2)})</span>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <span className="px-2 py-0.5 bg-purple-950 text-purple-300 rounded font-bold">x{item.count}</span>
+                              <button 
+                                onClick={() => {
+                                  setTradeOffering(prev => prev.filter(p => p.cardId !== item.cardId));
+                                }}
+                                className="text-slate-500 hover:text-red-400"
+                              >
+                                <X className="w-4 h-4" />
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  {/* Add from Vault dropdown picker */}
+                  <div className="mt-4 pt-4 border-t border-slate-800">
+                    <label className="block text-xs font-medium text-slate-400 mb-1">Add card from your vault:</label>
+                    <select
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        if (!val) return;
+                        setTradeOffering(prev => {
+                          const exist = prev.find(p => p.cardId === val);
+                          if (exist) return prev.map(p => p.cardId === val ? { ...p, count: p.count + 1 } : p);
+                          return [...prev, { cardId: val, count: 1 }];
+                        });
+                        e.target.value = '';
+                      }}
+                      className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-purple-500"
+                    >
+                      <option value="">-- Choose Card --</option>
+                      {cards.map(c => (
+                        <option key={c.id} value={c.id}>
+                          {c.name} ({c.setName}) - ${c.price.toFixed(2)} [x{c.quantity}]
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+              </div>
+
+              {/* SIDE B: Requesting from Partner */}
+              <div className="bg-slate-900/90 border border-indigo-500/30 rounded-2xl p-5 shadow-xl backdrop-blur-md flex flex-col justify-between">
+                <div>
+                  <div className="flex items-center justify-between mb-4 border-b border-slate-800 pb-3">
+                    <div>
+                      <h3 className="font-bold text-indigo-300 text-base">You Request (Partner)</h3>
+                      <p className="text-xs text-slate-400">Target cards you want in return</p>
+                    </div>
+                    <span className="text-lg font-bold font-mono text-emerald-400">
+                      ${tradeRequestTotal.toFixed(2)}
+                    </span>
+                  </div>
+
+                  {/* Requested cards list */}
+                  {tradeRequesting.length === 0 ? (
+                    <p className="text-xs text-slate-500 italic py-6 text-center">No target cards requested yet.</p>
+                  ) : (
+                    <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
+                      {tradeRequesting.map((item, idx) => (
+                        <div key={idx} className="flex items-center justify-between p-2.5 bg-slate-950/80 rounded-xl border border-slate-800 text-xs">
+                          <div>
+                            <span className="font-semibold text-slate-100">{item.name}</span>
+                            <span className="text-slate-400 ml-2">(${Number(item.price).toFixed(2)})</span>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <span className="px-2 py-0.5 bg-indigo-950 text-indigo-300 rounded font-bold">x{item.count}</span>
+                            <button 
+                              onClick={() => {
+                                setTradeRequesting(prev => prev.filter((_, i) => i !== idx));
+                              }}
+                              className="text-slate-500 hover:text-red-400"
+                            >
+                              <X className="w-4 h-4" />
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Manual add requested card form */}
+                  <div className="mt-4 pt-4 border-t border-slate-800 grid grid-cols-3 gap-2">
+                    <input
+                      type="text"
+                      placeholder="Card Name"
+                      value={customRequestInput.name}
+                      onChange={(e) => setCustomRequestInput({ ...customRequestInput, name: e.target.value })}
+                      className="col-span-2 bg-slate-950 border border-slate-700 rounded-xl px-3 py-1.5 text-xs text-slate-200"
+                    />
+                    <input
+                      type="number"
+                      placeholder="Val ($)"
+                      value={customRequestInput.price}
+                      onChange={(e) => setCustomRequestInput({ ...customRequestInput, price: e.target.value })}
+                      className="bg-slate-950 border border-slate-700 rounded-xl px-3 py-1.5 text-xs text-slate-200"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (!customRequestInput.name || !customRequestInput.price) return;
+                        setTradeRequesting(prev => [...prev, { ...customRequestInput }]);
+                        setCustomRequestInput({ name: '', price: '', count: 1, isFoil: false });
+                      }}
+                      className="col-span-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-semibold"
+                    >
+                      + Add Requested Card
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+            </div>
+
+            {/* Trade Balance Summary Banner */}
+            <div className="bg-slate-900/90 border border-slate-800 rounded-2xl p-6 text-center shadow-xl">
+              <h4 className="text-xs uppercase tracking-wider font-semibold text-slate-400">Trade Balance Difference</h4>
+              <div className="text-3xl font-extrabold font-mono mt-1">
+                {tradeDifference === 0 ? (
+                  <span className="text-slate-300">Even Trade ($0.00)</span>
+                ) : tradeDifference > 0 ? (
+                  <span className="text-amber-400">+${tradeDifference.toFixed(2)} (You offer more)</span>
+                ) : (
+                  <span className="text-emerald-400">-${Math.abs(tradeDifference).toFixed(2)} (Partner offers more)</span>
+                )}
+              </div>
+            </div>
+
+            {/* Past Saved Trade Proposals */}
+            {trades.length > 0 && (
+              <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-5 backdrop-blur-md">
+                <h3 className="font-bold text-white mb-4 text-sm">Saved Trade Proposals</h3>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {trades.map(t => (
+                    <div key={t.id} className="bg-slate-950 border border-slate-800 rounded-xl p-4 text-xs space-y-2">
+                      <div className="flex justify-between items-center">
+                        <span className="font-bold text-purple-300">{t.partnerName}</span>
+                        <span className="text-[10px] text-slate-500">{new Date(t.createdAt).toLocaleDateString()}</span>
+                      </div>
+                      <div className="flex justify-between text-slate-400">
+                        <span>Offered: ${t.offerTotal?.toFixed(2)}</span>
+                        <span>Requested: ${t.requestTotal?.toFixed(2)}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+          </div>
+        )}
+
+        {/* Analytics & Stats Tab */}
+        {activeTab === 'analytics' && (
+          <div className="space-y-6">
+            <div className="bg-slate-900/90 border border-slate-800 rounded-2xl p-6 shadow-xl backdrop-blur-md">
+              <h2 className="text-xl font-bold text-white mb-6 flex items-center gap-2">
+                <BarChart3 className="w-5 h-5 text-purple-400" />
+                Collection Analytics & Color Breakdown
+              </h2>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                {/* Color Distribution */}
+                <div>
+                  <h3 className="text-sm font-semibold text-slate-300 mb-4">Cards by Mana Color</h3>
+                  <div className="space-y-3">
+                    {Object.entries(metrics.colorBreakdown).map(([key, count]) => {
+                      const colorInfo = COLOR_MAP[key];
+                      const pct = metrics.totalCards > 0 ? ((count / metrics.totalCards) * 100).toFixed(1) : 0;
+                      return (
+                        <div key={key} className="space-y-1">
+                          <div className="flex justify-between text-xs">
+                            <span className="flex items-center gap-2 text-slate-200">
+                              <span>{colorInfo.symbol}</span>
+                              <span>{colorInfo.name}</span>
+                            </span>
+                            <span className="text-slate-400 font-mono">{count} cards ({pct}%)</span>
+                          </div>
+                          <div className="w-full bg-slate-950 rounded-full h-2 overflow-hidden border border-slate-800">
+                            <div 
+                              className={`h-full ${colorInfo.bg.replace('/60', '')} transition-all duration-500`}
+                              style={{ width: `${pct}%` }}
+                            />
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Rarity Breakdown */}
+                <div>
+                  <h3 className="text-sm font-semibold text-slate-300 mb-4">Cards by Rarity</h3>
+                  <div className="space-y-3">
+                    {Object.entries(metrics.rarityBreakdown).map(([rarity, count]) => {
+                      const pct = metrics.totalCards > 0 ? ((count / metrics.totalCards) * 100).toFixed(1) : 0;
+                      return (
+                        <div key={rarity} className="space-y-1">
+                          <div className="flex justify-between text-xs capitalize">
+                            <span className="text-slate-200">{rarity}</span>
+                            <span className="text-slate-400 font-mono">{count} cards ({pct}%)</span>
+                          </div>
+                          <div className="w-full bg-slate-950 rounded-full h-2 overflow-hidden border border-slate-800">
+                            <div 
+                              className={`h-full ${
+                                rarity === 'mythic' ? 'bg-amber-500' :
+                                rarity === 'rare' ? 'bg-yellow-400' :
+                                rarity === 'uncommon' ? 'bg-slate-400' : 'bg-zinc-600'
+                              } transition-all duration-500`}
+                              style={{ width: `${pct}%` }}
+                            />
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+
+            </div>
+          </div>
+        )}
+
+      </main>
+    </div>
+  );
+}
