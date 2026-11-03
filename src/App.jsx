@@ -4,12 +4,20 @@ import {
   getFirestore, 
   collection, 
   addDoc, 
-  getDocs, 
   doc, 
   updateDoc, 
   deleteDoc, 
-  onSnapshot 
+  onSnapshot,
+  query,
+  where 
 } from 'firebase/firestore';
+import { 
+  getAuth, 
+  createUserWithEmailAndPassword, 
+  signInWithEmailAndPassword, 
+  signOut, 
+  onAuthStateChanged 
+} from 'firebase/auth';
 import { 
   Search, 
   Plus, 
@@ -17,14 +25,16 @@ import {
   ArrowLeftRight, 
   Upload, 
   Database, 
-  Filter, 
   TrendingUp, 
   PackageCheck,
   Sparkles,
-  Layers
+  Layers,
+  LogOut,
+  LogIn,
+  UserPlus
 } from 'lucide-react';
 
-// Your Firebase Configuration
+// 1. Your Firebase Configuration
 const firebaseConfig = {
   apiKey: "AIzaSyBMQ0tEGF7v06xvo2LeiNkVPwibJk1epEg",
   authDomain: "mtg-collection-dsmith.firebaseapp.com",
@@ -35,9 +45,10 @@ const firebaseConfig = {
   measurementId: "G-ZKMB48LSG5"
 };
 
-// Initialize Firebase
+// 2. Initialize Firebase in correct order
 const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
+const auth = getAuth(app);
 
 // Helper for Scryfall Mana Colors
 const renderManaBadges = (colors = []) => {
@@ -61,6 +72,14 @@ const renderManaBadges = (colors = []) => {
 };
 
 export default function App() {
+  // Auth State
+  const [user, setUser] = useState(null);
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [authError, setAuthError] = useState('');
+  const [isRegistering, setIsRegistering] = useState(false);
+
+  // App Navigation & Data State
   const [activeTab, setActiveTab] = useState('collection');
   const [cards, setCards] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -85,11 +104,26 @@ export default function App() {
   // Trade Calculator State
   const [offeredCards, setOfferedCards] = useState([]);
   const [requestedCards, setRequestedCards] = useState([]);
-  const [tradePartner, setTradePartner] = useState('');
 
-  // Real-time listener for Firebase Firestore collection
+  // Auth Listener
   useEffect(() => {
-    const unsubscribe = onSnapshot(collection(db, 'cards'), (snapshot) => {
+    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+      setUser(currentUser);
+      if (!currentUser) setLoading(false);
+    });
+    return () => unsubscribe();
+  }, []);
+
+  // Fetch cards belonging ONLY to logged-in user
+  useEffect(() => {
+    if (!user) {
+      setCards([]);
+      return;
+    }
+
+    setLoading(true);
+    const q = query(collection(db, 'cards'), where("userId", "==", user.uid));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
       const cardsData = snapshot.docs.map((doc) => ({
         id: doc.id,
         ...doc.data()
@@ -102,7 +136,26 @@ export default function App() {
     });
 
     return () => unsubscribe();
-  }, []);
+  }, [user]);
+
+  // Auth Handlers
+  const handleAuth = async (e) => {
+    e.preventDefault();
+    setAuthError('');
+    try {
+      if (isRegistering) {
+        await createUserWithEmailAndPassword(auth, email, password);
+      } else {
+        await signInWithEmailAndPassword(auth, email, password);
+      }
+      setEmail('');
+      setPassword('');
+    } catch (err) {
+      setAuthError(err.message.replace('Firebase: ', ''));
+    }
+  };
+
+  const handleLogout = () => signOut(auth);
 
   // Scryfall API Card Autocomplete
   useEffect(() => {
@@ -126,7 +179,6 @@ export default function App() {
     return () => clearTimeout(timer);
   }, [queryName]);
 
-  // Fetch full details when a card is selected from dropdown
   const handleSelectCardName = async (name) => {
     setQueryName(name);
     setSearchResults([]);
@@ -142,9 +194,9 @@ export default function App() {
     }
   };
 
-  // Add Card to Firebase Collection
+  // Add Card to Firebase Collection with userId attached
   const handleAddCardToCollection = async () => {
-    if (!selectedScryfallCard) return;
+    if (!selectedScryfallCard || !user) return;
 
     const price = selectedScryfallCard.prices?.usd 
       ? parseFloat(selectedScryfallCard.prices.usd) 
@@ -152,7 +204,6 @@ export default function App() {
 
     const imageUrl = selectedScryfallCard.image_uris?.normal || selectedScryfallCard.card_faces?.[0]?.image_uris?.normal || '';
 
-    // Check if card already exists in Firestore
     const existingIndex = cards.findIndex(c => c.name.toLowerCase() === selectedScryfallCard.name.toLowerCase() && c.isFoil === isFoil);
 
     if (existingIndex > -1) {
@@ -163,6 +214,7 @@ export default function App() {
       });
     } else {
       await addDoc(collection(db, 'cards'), {
+        userId: user.uid,
         name: selectedScryfallCard.name,
         setName: selectedScryfallCard.set_name || 'Unknown Set',
         setCode: selectedScryfallCard.set?.toUpperCase() || 'MTG',
@@ -177,21 +229,19 @@ export default function App() {
       });
     }
 
-    // Reset inputs
     setQueryName('');
     setSelectedScryfallCard(null);
     setAddQuantity(1);
     setIsFoil(false);
   };
 
-  // Remove or Decrement Card from Firestore
   const handleDeleteCard = async (cardId) => {
     await deleteDoc(doc(db, 'cards', cardId));
   };
 
-  // CSV Import Parser
+  // CSV Import with userId scoping
   const handleCsvImport = async () => {
-    if (!csvText.trim()) return;
+    if (!csvText.trim() || !user) return;
     setImportStatus('Processing CSV data...');
     
     const lines = csvText.trim().split('\n');
@@ -209,6 +259,7 @@ export default function App() {
 
       if (name) {
         await addDoc(collection(db, 'cards'), {
+          userId: user.uid,
           name: name,
           setName: setName,
           setCode: 'CSV',
@@ -230,7 +281,6 @@ export default function App() {
     setTimeout(() => setImportStatus(''), 4000);
   };
 
-  // Filtered Cards
   const filteredCards = cards.filter((c) => {
     const matchesSearch = c.name.toLowerCase().includes(searchTerm.toLowerCase()) || 
                           c.setName.toLowerCase().includes(searchTerm.toLowerCase());
@@ -239,18 +289,83 @@ export default function App() {
     return matchesSearch && matchesColor && matchesRarity;
   });
 
-  // Collection Summary Stats
   const totalCardsCount = cards.reduce((acc, c) => acc + c.quantity, 0);
   const totalValue = cards.reduce((acc, c) => acc + (c.price * c.quantity), 0).toFixed(2);
-
-  // Trade Totals
   const offeredTotal = offeredCards.reduce((acc, c) => acc + (c.price * c.tradeQty), 0).toFixed(2);
   const requestedTotal = requestedCards.reduce((acc, c) => acc + (c.price * c.tradeQty), 0).toFixed(2);
   const tradeDelta = (offeredTotal - requestedTotal).toFixed(2);
 
+  // AUTHENTICATION SCREEN FOR UNAUTHENTICATED USERS
+  if (!user) {
+    return (
+      <div className="min-h-screen bg-gray-950 flex items-center justify-center p-4">
+        <div className="max-w-md w-full bg-gray-900 border border-gray-800 rounded-2xl p-8 space-y-6">
+          <div className="text-center space-y-2">
+            <div className="inline-flex p-3 bg-indigo-600 rounded-xl shadow-lg shadow-indigo-500/30 mb-2">
+              <Layers className="w-8 h-8 text-white" />
+            </div>
+            <h1 className="text-2xl font-bold text-white">Planeswalker Vault</h1>
+            <p className="text-sm text-gray-400">
+              {isRegistering ? 'Create an account to start managing your collection' : 'Sign in to access your MTG collection'}
+            </p>
+          </div>
+
+          <form onSubmit={handleAuth} className="space-y-4">
+            <div>
+              <label className="text-xs text-gray-400 font-medium">Email Address</label>
+              <input
+                type="email"
+                required
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="planeswalker@magic.com"
+                className="w-full bg-gray-950 border border-gray-800 rounded-xl px-4 py-2.5 text-sm text-white focus:outline-none focus:border-indigo-500 mt-1"
+              />
+            </div>
+
+            <div>
+              <label className="text-xs text-gray-400 font-medium">Password</label>
+              <input
+                type="password"
+                required
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="••••••••"
+                className="w-full bg-gray-950 border border-gray-800 rounded-xl px-4 py-2.5 text-sm text-white focus:outline-none focus:border-indigo-500 mt-1"
+              />
+            </div>
+
+            {authError && (
+              <p className="text-xs text-red-400 font-medium">{authError}</p>
+            )}
+
+            <button
+              type="submit"
+              className="w-full py-3 bg-indigo-600 hover:bg-indigo-500 text-white font-medium text-sm rounded-xl transition shadow-lg shadow-indigo-600/20 flex items-center justify-center gap-2"
+            >
+              {isRegistering ? <UserPlus className="w-4 h-4" /> : <LogIn className="w-4 h-4" />}
+              {isRegistering ? 'Create Account' : 'Sign In'}
+            </button>
+          </form>
+
+          <div className="text-center">
+            <button
+              onClick={() => {
+                setIsRegistering(!isRegistering);
+                setAuthError('');
+              }}
+              className="text-xs text-indigo-400 hover:text-indigo-300 font-medium"
+            >
+              {isRegistering ? 'Already have an account? Sign in' : "Don't have an account? Register now"}
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-gray-950 text-gray-100 font-sans antialiased">
-      {/* Top Header */}
       <header className="border-b border-gray-800 bg-gray-900/80 backdrop-blur sticky top-0 z-50">
         <div className="max-w-7xl mx-auto px-4 py-4 flex flex-col md:flex-row justify-between items-center gap-4">
           <div className="flex items-center gap-3">
@@ -261,46 +376,52 @@ export default function App() {
               <h1 className="text-xl font-bold bg-gradient-to-r from-indigo-400 to-purple-400 bg-clip-text text-transparent">
                 Planeswalker Vault
               </h1>
-              <p className="text-xs text-gray-400">MTG Collection & Trade Hub</p>
+              <p className="text-xs text-gray-400">Signed in as <span className="text-indigo-300">{user.email}</span></p>
             </div>
           </div>
 
-          {/* Navigation Tabs */}
-          <nav className="flex bg-gray-800/80 p-1 rounded-xl border border-gray-700/50">
+          <div className="flex items-center gap-4">
+            <nav className="flex bg-gray-800/80 p-1 rounded-xl border border-gray-700/50">
+              <button
+                onClick={() => setActiveTab('collection')}
+                className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition ${
+                  activeTab === 'collection' ? 'bg-indigo-600 text-white shadow-md' : 'text-gray-400 hover:text-gray-200'
+                }`}
+              >
+                <Database className="w-4 h-4" /> Collection
+              </button>
+              <button
+                onClick={() => setActiveTab('add')}
+                className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition ${
+                  activeTab === 'add' ? 'bg-indigo-600 text-white shadow-md' : 'text-gray-400 hover:text-gray-200'
+                }`}
+              >
+                <Plus className="w-4 h-4" /> Add / Import
+              </button>
+              <button
+                onClick={() => setActiveTab('trade')}
+                className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition ${
+                  activeTab === 'trade' ? 'bg-indigo-600 text-white shadow-md' : 'text-gray-400 hover:text-gray-200'
+                }`}
+              >
+                <ArrowLeftRight className="w-4 h-4" /> Trade Calculator
+              </button>
+            </nav>
+
             <button
-              onClick={() => setActiveTab('collection')}
-              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition ${
-                activeTab === 'collection' ? 'bg-indigo-600 text-white shadow-md' : 'text-gray-400 hover:text-gray-200'
-              }`}
+              onClick={handleLogout}
+              className="p-2 bg-red-500/10 hover:bg-red-500/20 text-red-400 rounded-xl transition border border-red-500/20"
+              title="Sign Out"
             >
-              <Database className="w-4 h-4" /> Collection
+              <LogOut className="w-5 h-5" />
             </button>
-            <button
-              onClick={() => setActiveTab('add')}
-              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition ${
-                activeTab === 'add' ? 'bg-indigo-600 text-white shadow-md' : 'text-gray-400 hover:text-gray-200'
-              }`}
-            >
-              <Plus className="w-4 h-4" /> Add / Import
-            </button>
-            <button
-              onClick={() => setActiveTab('trade')}
-              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition ${
-                activeTab === 'trade' ? 'bg-indigo-600 text-white shadow-md' : 'text-gray-400 hover:text-gray-200'
-              }`}
-            >
-              <ArrowLeftRight className="w-4 h-4" /> Trade Calculator
-            </button>
-          </nav>
+          </div>
         </div>
       </header>
 
-      {/* Main Content Area */}
       <main className="max-w-7xl mx-auto px-4 py-8">
-        {/* TAB 1: COLLECTION VIEW */}
         {activeTab === 'collection' && (
           <div className="space-y-6">
-            {/* Analytics Header Cards */}
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
               <div className="bg-gray-900/90 border border-gray-800 p-5 rounded-2xl flex items-center gap-4">
                 <div className="p-3 bg-indigo-500/10 text-indigo-400 rounded-xl">
@@ -333,7 +454,6 @@ export default function App() {
               </div>
             </div>
 
-            {/* Filters Bar */}
             <div className="bg-gray-900 border border-gray-800 p-4 rounded-2xl flex flex-col md:flex-row gap-4 justify-between items-center">
               <div className="relative w-full md:w-96">
                 <Search className="w-4 h-4 absolute left-3 top-3 text-gray-500" />
@@ -374,12 +494,11 @@ export default function App() {
               </div>
             </div>
 
-            {/* Cards Grid Display */}
             {loading ? (
-              <div className="text-center py-20 text-gray-500">Loading your collection from server...</div>
+              <div className="text-center py-20 text-gray-500">Loading your collection...</div>
             ) : filteredCards.length === 0 ? (
               <div className="text-center py-20 border border-dashed border-gray-800 rounded-2xl bg-gray-900/40">
-                <p className="text-gray-400 font-medium">No Magic cards found matching your criteria.</p>
+                <p className="text-gray-400 font-medium">No Magic cards found in your account.</p>
                 <button
                   onClick={() => setActiveTab('add')}
                   className="mt-4 px-4 py-2 bg-indigo-600 text-white text-sm font-medium rounded-xl hover:bg-indigo-500 transition"
@@ -433,10 +552,8 @@ export default function App() {
           </div>
         )}
 
-        {/* TAB 2: ADD / IMPORT */}
         {activeTab === 'add' && (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-            {/* Scryfall Real-Time Search Add */}
             <div className="bg-gray-900 border border-gray-800 p-6 rounded-2xl space-y-4">
               <h2 className="text-lg font-bold text-white flex items-center gap-2">
                 <Search className="w-5 h-5 text-indigo-400" /> Search & Quick Add
@@ -452,7 +569,6 @@ export default function App() {
                   className="w-full bg-gray-950 border border-gray-800 rounded-xl px-4 py-2.5 text-sm text-white focus:outline-none focus:border-indigo-500"
                 />
 
-                {/* Autocomplete Dropdown */}
                 {searchResults.length > 0 && (
                   <div className="absolute left-0 right-0 top-full mt-1 bg-gray-900 border border-gray-800 rounded-xl shadow-2xl max-h-60 overflow-y-auto z-50">
                     {searchResults.map((item) => (
@@ -512,19 +628,18 @@ export default function App() {
                     onClick={handleAddCardToCollection}
                     className="w-full py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white font-medium text-sm rounded-xl transition shadow-lg shadow-indigo-600/20"
                   >
-                    Add to Server Collection
+                    Add to Personal Collection
                   </button>
                 </div>
               )}
             </div>
 
-            {/* CSV Batch Import */}
             <div className="bg-gray-900 border border-gray-800 p-6 rounded-2xl space-y-4">
               <h2 className="text-lg font-bold text-white flex items-center gap-2">
                 <Upload className="w-5 h-5 text-indigo-400" /> CSV Collection Import
               </h2>
               <p className="text-xs text-gray-400">
-                Paste raw CSV content to add 50+ newly opened cards. Format: <code className="text-indigo-300">Name, Quantity, Set, Price</code>
+                Paste raw CSV content to add card lists. Format: <code className="text-indigo-300">Name, Quantity, Set, Price</code>
               </p>
 
               <textarea
@@ -549,7 +664,6 @@ export default function App() {
           </div>
         )}
 
-        {/* TAB 3: TRADE CALCULATOR */}
         {activeTab === 'trade' && (
           <div className="space-y-6">
             <div className="bg-gray-900 border border-gray-800 p-6 rounded-2xl flex flex-col md:flex-row justify-between items-center gap-4">
@@ -577,7 +691,6 @@ export default function App() {
               </div>
             </div>
 
-            {/* Quick Picker Grid for Trades */}
             <div className="bg-gray-900 border border-gray-800 p-6 rounded-2xl space-y-4">
               <h3 className="text-sm font-bold text-gray-300">Select Cards from Collection to Add to Trade</h3>
               <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-3 max-h-64 overflow-y-auto pr-2">
@@ -599,7 +712,6 @@ export default function App() {
               </div>
             </div>
 
-            {/* Offered Items List */}
             <div className="bg-gray-900 border border-gray-800 p-6 rounded-2xl space-y-4">
               <h3 className="text-sm font-bold text-indigo-400">Offered Cards ({offeredCards.length})</h3>
               {offeredCards.length === 0 ? (
