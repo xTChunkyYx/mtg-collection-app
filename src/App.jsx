@@ -304,7 +304,7 @@ export default function App() {
             <div className="inline-flex p-3 bg-indigo-600 rounded-xl shadow-lg shadow-indigo-500/30 mb-2">
               <Layers className="w-8 h-8 text-white" />
             </div>
-            <h1 className="text-2xl font-bold text-white">Planeswalker Vault</h1>
+            <h1 className="text-2xl font-bold text-white">Goober Box</h1>
             <p className="text-sm text-gray-400">
               {isRegistering ? 'Create an account to start managing your collection' : 'Sign in to access your MTG collection'}
             </p>
@@ -374,7 +374,7 @@ export default function App() {
             </div>
             <div>
               <h1 className="text-xl font-bold bg-gradient-to-r from-indigo-400 to-purple-400 bg-clip-text text-transparent">
-                Planeswalker Vault
+                Goober box
               </h1>
               <p className="text-xs text-gray-400">Signed in as <span className="text-indigo-300">{user.email}</span></p>
             </div>
