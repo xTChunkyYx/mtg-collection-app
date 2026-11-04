@@ -81,7 +81,7 @@ const renderManaBadges = (colors = []) => {
   );
 };
 
-// Clean currency and numeric strings safely
+// Clean currency and numeric strings safely to avoid math bugs
 const parseSafeNumber = (val, fallback = 0) => {
   if (typeof val === 'number') return isNaN(val) ? fallback : val;
   if (!val) return fallback;
@@ -209,7 +209,6 @@ export default function App() {
   useEffect(() => {
     if (activeTab !== 'community') return;
 
-    // Fetch registered players
     const unsubUsers = onSnapshot(collection(db, 'users'), (snapshot) => {
       const usersData = snapshot.docs.map((docSnap) => ({
         id: docSnap.id,
@@ -218,7 +217,6 @@ export default function App() {
       setCommunityUsers(usersData);
     });
 
-    // Fetch all public cards
     const unsubCards = onSnapshot(collection(db, 'cards'), (snapshot) => {
       const publicData = snapshot.docs.map((docSnap) => ({
         id: docSnap.id,
@@ -260,15 +258,19 @@ export default function App() {
     }
   };
 
+  // Fixed Username Update Handler
   const handleUpdateUsername = async (e) => {
     e.preventDefault();
     if (!newUsername.trim() || !user) return;
     try {
-      await updateDoc(doc(db, 'users', user.uid), {
-        username: newUsername.trim()
-      });
+      await setDoc(doc(db, 'users', user.uid), {
+        uid: user.uid,
+        email: user.email,
+        username: newUsername.trim(),
+        updatedAt: new Date().toISOString()
+      }, { merge: true });
+
       setIsEditingUsername(false);
-      setNewUsername('');
     } catch (err) {
       console.error("Failed to update username:", err);
     }
@@ -450,7 +452,7 @@ export default function App() {
     setTimeout(() => setImportStatus(''), 4000);
   };
 
-  // Filtered Cards (Personal)
+  // Personal Filtered Cards
   const filteredCards = cards.filter((c) => {
     const matchesSearch = c.name.toLowerCase().includes(searchTerm.toLowerCase()) || 
                           c.setName.toLowerCase().includes(searchTerm.toLowerCase());
@@ -595,7 +597,10 @@ export default function App() {
                   Tag: <strong className="text-indigo-300">@{userProfile?.username || 'GooberPlayer'}</strong>
                 </span>
                 <button
-                  onClick={() => setIsEditingUsername(true)}
+                  onClick={() => {
+                    setNewUsername(userProfile?.username || '');
+                    setIsEditingUsername(true);
+                  }}
                   className="text-gray-500 hover:text-indigo-400 transition"
                   title="Change Community Tag"
                 >
@@ -671,7 +676,7 @@ export default function App() {
                 <input
                   type="text"
                   required
-                  defaultValue={userProfile?.username}
+                  value={newUsername}
                   onChange={(e) => setNewUsername(e.target.value)}
                   className="w-full bg-gray-950 border border-gray-800 rounded-xl px-4 py-2 text-sm text-white focus:outline-none focus:border-indigo-500 mt-1"
                 />
