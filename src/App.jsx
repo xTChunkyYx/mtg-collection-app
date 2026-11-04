@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { initializeApp } from 'firebase/app';
 import { 
   getFirestore, 
@@ -42,7 +42,8 @@ import {
   ArrowLeft,
   Edit3,
   X,
-  FileSpreadsheet
+  FileSpreadsheet,
+  Loader2
 } from 'lucide-react';
 
 // 1. Firebase Configuration
@@ -82,7 +83,7 @@ const renderManaBadges = (colors = []) => {
   );
 };
 
-// Clean currency and numeric strings safely to avoid calculation errors
+// Clean currency and numeric strings safely
 const parseSafeNumber = (val, fallback = 0) => {
   if (typeof val === 'number') return isNaN(val) ? fallback : val;
   if (!val) return fallback;
@@ -117,7 +118,7 @@ export default function App() {
   const [selectedPlayer, setSelectedPlayer] = useState(null);
   const [playerSearchTerm, setPlayerSearchTerm] = useState('');
 
-  // Personal Search & Filters
+  // Search & Filters for Personal Collection
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedColor, setSelectedColor] = useState('ALL');
   const [selectedRarity, setSelectedRarity] = useState('ALL');
@@ -139,6 +140,8 @@ export default function App() {
   // CSV Import State
   const [csvText, setCsvText] = useState('');
   const [importStatus, setImportStatus] = useState('');
+  const [isImporting, setIsImporting] = useState(false);
+  const fileInputRef = useRef(null);
 
   // Trade Calculator State
   const [offeredCards, setOfferedCards] = useState([]);
@@ -322,7 +325,7 @@ export default function App() {
     }
   };
 
-  // Add Single Card to Firestore
+  // Add Card to Firestore
   const handleAddCardToCollection = async () => {
     if (!selectedPrinting || !user) return;
 
@@ -375,99 +378,115 @@ export default function App() {
     await deleteDoc(doc(db, 'cards', cardId));
   };
 
-  // --- CORE CSV PARSER (Handles Daveon's Binder CSV, ManaBox, Moxfield, TCGPlayer) ---
-  const processCsvContent = async (rawText) => {
-    if (!rawText || !rawText.trim() || !user) return;
-    setImportStatus('Processing CSV cards into your Goober box...');
+  // CSV Parser & Auto Art Fetcher
+  const processCsvContent = async (rawText, fileName = '') => {
+    if (!rawText || !rawText.trim() || !user || isImporting) return;
+    setIsImporting(true);
+    setImportStatus('Parsing & importing cards into Goober Box...');
 
-    const lines = rawText.trim().split(/\r\n|\n/);
-    if (lines.length === 0) return;
+    try {
+      const lines = rawText.trim().split(/\r\n|\n/);
+      if (lines.length === 0) return;
 
-    let addedCount = 0;
-    const headerLine = lines[0].toLowerCase();
-    const hasHeaders = headerLine.includes('name') || headerLine.includes('card') || headerLine.includes('count') || headerLine.includes('edition');
-    
-    const startIndex = hasHeaders ? 1 : 0;
-    let headers = [];
-    if (hasHeaders) {
-      headers = lines[0].split(',').map(h => h.trim().replace(/^"|"$/g, '').toLowerCase());
-    }
-
-    for (let i = startIndex; i < lines.length; i++) {
-      const line = lines[i].trim();
-      if (!line) continue;
-
-      let name = '';
-      let quantity = 1;
-      let setName = 'Imported Set';
-      let price = 0.50;
-      let isFoilEntry = false;
-      let rarity = 'rare';
-
-      // Safe CSV split supporting quoted string fields
-      const parts = line.match(/(".*?"|[^",\s]+)(?=\s*,|\s*$)/g) || line.split(',');
-      const cleanParts = parts.map(p => p.trim().replace(/^"|"$/g, ''));
-
+      let addedCount = 0;
+      const headerLine = lines[0].toLowerCase();
+      const hasHeaders = headerLine.includes('name') || headerLine.includes('card') || headerLine.includes('count') || headerLine.includes('edition');
+      
+      const startIndex = hasHeaders ? 1 : 0;
+      let headers = [];
       if (hasHeaders) {
-        const getCol = (keys) => {
-          for (let k of keys) {
-            const idx = headers.findIndex(h => h.includes(k));
-            if (idx !== -1 && cleanParts[idx] !== undefined) return cleanParts[idx];
-          }
-          return '';
-        };
-
-        name = getCol(['name', 'card']);
-        quantity = parseSafeNumber(getCol(['count', 'qty', 'quantity']), 1);
-        setName = getCol(['set', 'edition']) || 'Imported Set';
-        price = parseSafeNumber(getCol(['price', 'usd', 'value', 'market', 'purchase price']), 0.50);
-        rarity = getCol(['rarity']) || 'rare';
-        const foilVal = getCol(['foil', 'finish']).toLowerCase();
-        isFoilEntry = foilVal.includes('foil') || foilVal === 'yes' || foilVal === 'true';
-      } else {
-        name = cleanParts[0];
-        quantity = parseSafeNumber(cleanParts[1], 1);
-        setName = cleanParts[2] || 'Imported Binder';
-        price = parseSafeNumber(cleanParts[3], 0.50);
+        headers = lines[0].split(',').map(h => h.trim().replace(/^"|"$/g, '').toLowerCase());
       }
 
-      if (name && !isNaN(quantity) && quantity > 0) {
-        await addDoc(collection(db, 'cards'), {
-          userId: user.uid,
-          name: name,
-          setName: setName,
-          setCode: 'CSV',
-          quantity: quantity,
-          price: price,
-          colors: ['C'],
-          rarity: rarity.toLowerCase(),
-          typeLine: 'Imported Card',
-          imageUrl: 'https://cards.scryfall.io/back.jpg',
-          isFoil: isFoilEntry,
-          addedAt: new Date().toISOString()
-        });
-        addedCount++;
+      for (let i = startIndex; i < lines.length; i++) {
+        const line = lines[i].trim();
+        if (!line) continue;
+
+        let name = '';
+        let quantity = 1;
+        let setName = 'Imported Set';
+        let setCode = 'CSV';
+        let price = 0.50;
+        let isFoilEntry = false;
+        let rarity = 'rare';
+
+        const parts = line.match(/(".*?"|[^",\s]+)(?=\s*,|\s*$)/g) || line.split(',');
+        const cleanParts = parts.map(p => p.trim().replace(/^"|"$/g, ''));
+
+        if (hasHeaders) {
+          const getCol = (keys) => {
+            for (let k of keys) {
+              const idx = headers.findIndex(h => h.includes(k));
+              if (idx !== -1 && cleanParts[idx] !== undefined) return cleanParts[idx];
+            }
+            return '';
+          };
+
+          name = getCol(['name', 'card']);
+          quantity = parseSafeNumber(getCol(['count', 'qty', 'quantity']), 1);
+          setName = getCol(['set', 'edition']) || 'Imported Set';
+          setCode = getCol(['set code', 'code']) || 'CSV';
+          price = parseSafeNumber(getCol(['price', 'usd', 'value', 'market', 'purchase price']), 0.50);
+          rarity = getCol(['rarity']) || 'rare';
+          const foilVal = getCol(['foil', 'finish']).toLowerCase();
+          isFoilEntry = foilVal.includes('foil') || foilVal === 'yes' || foilVal === 'true';
+        } else {
+          name = cleanParts[0];
+          quantity = parseSafeNumber(cleanParts[1], 1);
+          setName = cleanParts[2] || 'Imported Binder';
+          price = parseSafeNumber(cleanParts[3], 0.50);
+        }
+
+        if (name && !isNaN(quantity) && quantity > 0) {
+          // Dynamic Scryfall artwork redirect endpoint
+          const imageUrl = `https://api.scryfall.com/cards/named?fuzzy=${encodeURIComponent(name)}&format=image`;
+
+          await addDoc(collection(db, 'cards'), {
+            userId: user.uid,
+            name: name,
+            setName: setName,
+            setCode: setCode,
+            quantity: quantity,
+            price: price,
+            colors: ['C'],
+            rarity: rarity.toLowerCase(),
+            typeLine: 'Imported Card',
+            imageUrl: imageUrl,
+            isFoil: isFoilEntry,
+            addedAt: new Date().toISOString()
+          });
+          addedCount++;
+        }
       }
+
+      // Clear text box & file input on success to prevent multi-upload
+      setCsvText('');
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
+      
+      const sourceLabel = fileName ? `from file "${fileName}"` : 'from pasted CSV text';
+      setImportStatus(`✅ Successfully imported ${addedCount} cards ${sourceLabel}!`);
+    } catch (err) {
+      console.error("CSV Import Error:", err);
+      setImportStatus(`❌ Import failed: ${err.message}`);
+    } finally {
+      setIsImporting(false);
+      setTimeout(() => setImportStatus(''), 6000);
     }
-
-    setImportStatus(`Successfully imported ${addedCount} card entries from CSV!`);
-    setCsvText('');
-    setTimeout(() => setImportStatus(''), 4500);
   };
 
-  // Handler for File Input Selection (.csv file picker)
   const handleFileSelect = (event) => {
     const file = event.target.files[0];
-    if (!file) return;
+    if (!file || isImporting) return;
 
     setImportStatus(`Reading file "${file.name}"...`);
     const reader = new FileReader();
     reader.onload = async (e) => {
       const text = e.target.result;
-      await processCsvContent(text);
+      await processCsvContent(text, file.name);
     };
     reader.readAsText(file);
-    event.target.value = ''; // Reset file input so user can re-upload if needed
   };
 
   // Personal Filtered Cards
@@ -819,12 +838,16 @@ export default function App() {
               <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4">
                 {filteredCards.map((card) => (
                   <div key={card.id} className="bg-gray-900 border border-gray-800 rounded-2xl overflow-hidden group hover:border-gray-700 transition flex flex-col justify-between">
-                    <div className="relative">
+                    <div className="relative bg-gray-950 aspect-[2.5/3.5] overflow-hidden">
                       <img 
-                        src={card.imageUrl || 'https://cards.scryfall.io/back.jpg'} 
+                        src={card.imageUrl || `https://api.scryfall.com/cards/named?fuzzy=${encodeURIComponent(card.name)}&format=image`} 
                         alt={card.name} 
-                        className="w-full h-auto object-cover"
+                        className="w-full h-full object-cover group-hover:scale-105 transition duration-300"
                         loading="lazy"
+                        onError={(e) => {
+                          e.target.onerror = null;
+                          e.target.src = 'https://cards.scryfall.io/back.jpg';
+                        }}
                       />
                       <div className="absolute top-2 right-2 bg-gray-950/80 backdrop-blur text-xs px-2 py-1 rounded-lg font-bold border border-gray-700 text-indigo-300">
                         x{card.quantity}
@@ -1023,18 +1046,26 @@ export default function App() {
               </p>
 
               {/* CSV File Select Button */}
-              <div className="border-2 border-dashed border-gray-800 hover:border-indigo-500 transition rounded-xl p-6 text-center bg-gray-950/60">
+              <div className={`border-2 border-dashed transition rounded-xl p-6 text-center bg-gray-950/60 ${
+                isImporting ? 'border-indigo-500/50 opacity-60 pointer-events-none' : 'border-gray-800 hover:border-indigo-500'
+              }`}>
                 <input
                   type="file"
                   accept=".csv"
+                  ref={fileInputRef}
                   id="csvFileInput"
+                  disabled={isImporting}
                   onChange={handleFileSelect}
                   className="hidden"
                 />
                 <label htmlFor="csvFileInput" className="cursor-pointer space-y-2 block">
-                  <FileSpreadsheet className="w-10 h-10 text-indigo-400 mx-auto" />
+                  {isImporting ? (
+                    <Loader2 className="w-10 h-10 text-indigo-400 animate-spin mx-auto" />
+                  ) : (
+                    <FileSpreadsheet className="w-10 h-10 text-indigo-400 mx-auto" />
+                  )}
                   <span className="text-sm font-semibold text-indigo-300 block">
-                    Select CSV File from Computer
+                    {isImporting ? 'Processing File...' : 'Select CSV File from Computer'}
                   </span>
                   <span className="text-xs text-gray-500 block">
                     Supports .csv exports with headers (Name, Count, Edition, Price, Foil)
@@ -1049,20 +1080,31 @@ export default function App() {
 
               <textarea
                 rows="6"
+                disabled={isImporting}
                 placeholder="Count, Name, Edition, Price, Foil&#10;1, Black Lotus, Unlimited Edition, 12500, false&#10;4, Sol Ring, Commander Masters, 3.50, true"
                 value={csvText}
                 onChange={(e) => setCsvText(e.target.value)}
-                className="w-full bg-gray-950 border border-gray-800 rounded-xl p-3 text-xs font-mono text-gray-200 focus:outline-none focus:border-indigo-500"
+                className="w-full bg-gray-950 border border-gray-800 rounded-xl p-3 text-xs font-mono text-gray-200 focus:outline-none focus:border-indigo-500 disabled:opacity-50"
               />
 
               {importStatus && (
-                <p className="text-xs font-semibold text-emerald-400">{importStatus}</p>
+                <div className={`p-3 rounded-xl border text-xs font-semibold flex items-center gap-2 ${
+                  importStatus.includes('❌') 
+                    ? 'bg-red-500/10 border-red-500/30 text-red-400' 
+                    : importStatus.includes('✅')
+                    ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400'
+                    : 'bg-indigo-500/10 border-indigo-500/30 text-indigo-300'
+                }`}>
+                  {importStatus}
+                </div>
               )}
 
               <button
+                disabled={isImporting || !csvText.trim()}
                 onClick={() => processCsvContent(csvText)}
-                className="w-full py-2.5 bg-gray-800 hover:bg-gray-700 text-white font-medium text-sm rounded-xl transition border border-gray-700"
+                className="w-full py-2.5 bg-gray-800 hover:bg-gray-700 text-white font-medium text-sm rounded-xl transition border border-gray-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
               >
+                {isImporting && <Loader2 className="w-4 h-4 animate-spin" />}
                 Import Pasted Text Entries
               </button>
             </div>
@@ -1293,12 +1335,16 @@ export default function App() {
                   <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4">
                     {filteredCommunityPlayerCards.map((card) => (
                       <div key={card.id} className="bg-gray-900 border border-gray-800 rounded-2xl overflow-hidden flex flex-col justify-between">
-                        <div className="relative">
+                        <div className="relative bg-gray-950 aspect-[2.5/3.5] overflow-hidden">
                           <img 
-                            src={card.imageUrl || 'https://cards.scryfall.io/back.jpg'} 
+                            src={card.imageUrl || `https://api.scryfall.com/cards/named?fuzzy=${encodeURIComponent(card.name)}&format=image`} 
                             alt={card.name} 
-                            className="w-full h-auto object-cover"
+                            className="w-full h-full object-cover"
                             loading="lazy"
+                            onError={(e) => {
+                              e.target.onerror = null;
+                              e.target.src = 'https://cards.scryfall.io/back.jpg';
+                            }}
                           />
                           <div className="absolute top-2 right-2 bg-gray-950/80 backdrop-blur text-xs px-2 py-1 rounded-lg font-bold border border-gray-700 text-indigo-300">
                             x{card.quantity}
