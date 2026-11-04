@@ -5,6 +5,7 @@ import {
   collection, 
   addDoc, 
   doc, 
+  setDoc,
   updateDoc, 
   deleteDoc, 
   onSnapshot,
@@ -35,7 +36,12 @@ import {
   Image as ImageIcon,
   Check,
   Grid,
-  List as ListIcon
+  List as ListIcon,
+  User,
+  Users,
+  ArrowLeft,
+  Edit3,
+  X
 } from 'lucide-react';
 
 // 1. Firebase Configuration
@@ -89,23 +95,38 @@ export default function App() {
   const [user, setUser] = useState(null);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [usernameInput, setUsernameInput] = useState('');
   const [authError, setAuthError] = useState('');
   const [isRegistering, setIsRegistering] = useState(false);
+
+  // User Profile State
+  const [userProfile, setUserProfile] = useState(null);
+  const [isEditingUsername, setIsEditingUsername] = useState(false);
+  const [newUsername, setNewUsername] = useState('');
 
   // App Navigation & Data State
   const [activeTab, setActiveTab] = useState('collection');
   const [cards, setCards] = useState([]);
-  const [allPublicCards, setAllPublicCards] = useState([]);
-  const [selectedUserFilter, setSelectedUserFilter] = useState('ALL');
   const [loading, setLoading] = useState(true);
   const [viewMode, setViewMode] = useState('grid');
   
-  // Search & Filters
+  // Community State
+  const [communityUsers, setCommunityUsers] = useState([]);
+  const [allPublicCards, setAllPublicCards] = useState([]);
+  const [selectedPlayer, setSelectedPlayer] = useState(null);
+  const [playerSearchTerm, setPlayerSearchTerm] = useState('');
+
+  // Search & Filters for Personal Collection
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedColor, setSelectedColor] = useState('ALL');
   const [selectedRarity, setSelectedRarity] = useState('ALL');
+
+  // Community Inspector Filters
+  const [communitySearchTerm, setCommunitySearchTerm] = useState('');
+  const [communityColor, setCommunityColor] = useState('ALL');
+  const [communityRarity, setCommunityRarity] = useState('ALL');
   
-  // Scryfall Search & Printings / Art Picker State
+  // Scryfall Search & Printings State
   const [queryName, setQueryName] = useState('');
   const [searchResults, setSearchResults] = useState([]);
   const [isSearching, setIsSearching] = useState(false);
@@ -126,12 +147,39 @@ export default function App() {
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
       setUser(currentUser);
-      if (!currentUser) setLoading(false);
+      if (!currentUser) {
+        setUserProfile(null);
+        setLoading(false);
+      }
     });
     return () => unsubscribe();
   }, []);
 
-  // 2. Fetch cards belonging ONLY to logged-in user
+  // 2. Fetch or Create Current User Profile Doc
+  useEffect(() => {
+    if (!user) return;
+
+    const userDocRef = doc(db, 'users', user.uid);
+    const unsubscribe = onSnapshot(userDocRef, async (docSnap) => {
+      if (docSnap.exists()) {
+        setUserProfile(docSnap.data());
+      } else {
+        const defaultName = user.email ? user.email.split('@')[0] : 'GooberPlayer';
+        const newProfile = {
+          uid: user.uid,
+          email: user.email,
+          username: defaultName,
+          createdAt: new Date().toISOString()
+        };
+        await setDoc(userDocRef, newProfile);
+        setUserProfile(newProfile);
+      }
+    });
+
+    return () => unsubscribe();
+  }, [user]);
+
+  // 3. Fetch cards belonging ONLY to logged-in user
   useEffect(() => {
     if (!user) {
       setCards([]);
@@ -141,37 +189,50 @@ export default function App() {
     setLoading(true);
     const q = query(collection(db, 'cards'), where("userId", "==", user.uid));
     const unsubscribe = onSnapshot(q, (snapshot) => {
-      const cardsData = snapshot.docs.map((doc) => ({
-        id: doc.id,
-        ...doc.data(),
-        price: parseSafeNumber(doc.data().price, 0.50),
-        quantity: Math.max(1, parseInt(parseSafeNumber(doc.data().quantity, 1), 10))
+      const cardsData = snapshot.docs.map((docSnap) => ({
+        id: docSnap.id,
+        ...docSnap.data(),
+        price: parseSafeNumber(docSnap.data().price, 0.50),
+        quantity: Math.max(1, parseInt(parseSafeNumber(docSnap.data().quantity, 1), 10))
       }));
       setCards(cardsData);
       setLoading(false);
     }, (error) => {
-      console.error("Firestore snapshot error:", error);
+      console.error("Firestore cards snapshot error:", error);
       setLoading(false);
     });
 
     return () => unsubscribe();
   }, [user]);
 
-  // 3. Fetch ALL cards across all users for Community tab
+  // 4. Fetch Community Players & ALL Cards for Community Tab
   useEffect(() => {
     if (activeTab !== 'community') return;
 
-    const unsubscribe = onSnapshot(collection(db, 'cards'), (snapshot) => {
-      const publicData = snapshot.docs.map((doc) => ({
-        id: doc.id,
-        ...doc.data(),
-        price: parseSafeNumber(doc.data().price, 0.50),
-        quantity: Math.max(1, parseInt(parseSafeNumber(doc.data().quantity, 1), 10))
+    // Fetch registered players
+    const unsubUsers = onSnapshot(collection(db, 'users'), (snapshot) => {
+      const usersData = snapshot.docs.map((docSnap) => ({
+        id: docSnap.id,
+        ...docSnap.data()
+      }));
+      setCommunityUsers(usersData);
+    });
+
+    // Fetch all public cards
+    const unsubCards = onSnapshot(collection(db, 'cards'), (snapshot) => {
+      const publicData = snapshot.docs.map((docSnap) => ({
+        id: docSnap.id,
+        ...docSnap.data(),
+        price: parseSafeNumber(docSnap.data().price, 0.50),
+        quantity: Math.max(1, parseInt(parseSafeNumber(docSnap.data().quantity, 1), 10))
       }));
       setAllPublicCards(publicData);
     });
 
-    return () => unsubscribe();
+    return () => {
+      unsubUsers();
+      unsubCards();
+    };
   }, [activeTab]);
 
   // Auth Handlers
@@ -180,14 +241,36 @@ export default function App() {
     setAuthError('');
     try {
       if (isRegistering) {
-        await createUserWithEmailAndPassword(auth, email, password);
+        const userCred = await createUserWithEmailAndPassword(auth, email, password);
+        const finalUsername = usernameInput.trim() || email.split('@')[0];
+        await setDoc(doc(db, 'users', userCred.user.uid), {
+          uid: userCred.user.uid,
+          email: email,
+          username: finalUsername,
+          createdAt: new Date().toISOString()
+        });
       } else {
         await signInWithEmailAndPassword(auth, email, password);
       }
       setEmail('');
       setPassword('');
+      setUsernameInput('');
     } catch (err) {
       setAuthError(err.message.replace('Firebase: ', ''));
+    }
+  };
+
+  const handleUpdateUsername = async (e) => {
+    e.preventDefault();
+    if (!newUsername.trim() || !user) return;
+    try {
+      await updateDoc(doc(db, 'users', user.uid), {
+        username: newUsername.trim()
+      });
+      setIsEditingUsername(false);
+      setNewUsername('');
+    } catch (err) {
+      console.error("Failed to update username:", err);
     }
   };
 
@@ -215,7 +298,7 @@ export default function App() {
     return () => clearTimeout(timer);
   }, [queryName]);
 
-  // Fetch ALL Printings / Art Variants when card is selected
+  // Fetch Printings for Scryfall Card
   const handleSelectCardName = async (name) => {
     setQueryName(name);
     setSearchResults([]);
@@ -228,7 +311,7 @@ export default function App() {
       const searchData = await res.json();
       if (searchData.data && searchData.data.length > 0) {
         setAvailablePrintings(searchData.data);
-        setSelectedPrinting(searchData.data[0]); // Default to newest print
+        setSelectedPrinting(searchData.data[0]);
       }
     } catch (err) {
       console.error("Scryfall printings fetch error:", err);
@@ -237,7 +320,7 @@ export default function App() {
     }
   };
 
-  // Add Card to Firebase Collection with User Scoping & Print Info
+  // Add Card to Firestore
   const handleAddCardToCollection = async () => {
     if (!selectedPrinting || !user) return;
 
@@ -290,7 +373,7 @@ export default function App() {
     await deleteDoc(doc(db, 'cards', cardId));
   };
 
-  // Enhanced CSV Importer for Decks & Collection Files
+  // CSV Deck Importer
   const handleCsvImport = async () => {
     if (!csvText.trim() || !user) return;
     setImportStatus('Parsing deck & collection entries...');
@@ -318,7 +401,6 @@ export default function App() {
       let price = 0.50;
       let isFoilEntry = false;
 
-      // Match quoted CSV cells or comma splits
       const parts = line.match(/(".*?"|[^",\s]+)(?=\s*,|\s*$)/g) || line.split(',');
       const cleanParts = parts.map(p => p.trim().replace(/^"|"$/g, ''));
 
@@ -338,7 +420,6 @@ export default function App() {
         const foilVal = getCol(['foil', 'finish']).toLowerCase();
         isFoilEntry = foilVal.includes('foil') || foilVal === 'yes' || foilVal === 'true';
       } else {
-        // Line format parser for deck lists like: "1 Lightning Bolt [SLD] 2.50" or "4, Sol Ring, CMM, 1.50"
         name = cleanParts[0];
         quantity = parseSafeNumber(cleanParts[1], 1);
         setName = cleanParts[2] || 'Imported Deck';
@@ -369,7 +450,7 @@ export default function App() {
     setTimeout(() => setImportStatus(''), 4000);
   };
 
-  // Filtered Cards
+  // Filtered Cards (Personal)
   const filteredCards = cards.filter((c) => {
     const matchesSearch = c.name.toLowerCase().includes(searchTerm.toLowerCase()) || 
                           c.setName.toLowerCase().includes(searchTerm.toLowerCase());
@@ -378,7 +459,7 @@ export default function App() {
     return matchesSearch && matchesColor && matchesRarity;
   });
 
-  // Accurate Inventory Metrics
+  // Personal Metrics
   const totalCardsCount = useMemo(() => {
     return cards.reduce((acc, c) => acc + (Number(c.quantity) || 1), 0);
   }, [cards]);
@@ -392,6 +473,23 @@ export default function App() {
     return sum.toFixed(2);
   }, [cards]);
 
+  // Selected Community Player Cards
+  const selectedPlayerCards = useMemo(() => {
+    if (!selectedPlayer) return [];
+    return allPublicCards.filter(c => c.userId === selectedPlayer.uid);
+  }, [selectedPlayer, allPublicCards]);
+
+  const filteredCommunityPlayerCards = useMemo(() => {
+    return selectedPlayerCards.filter((c) => {
+      const matchesSearch = c.name.toLowerCase().includes(communitySearchTerm.toLowerCase()) || 
+                            c.setName.toLowerCase().includes(communitySearchTerm.toLowerCase());
+      const matchesColor = communityColor === 'ALL' || (c.colors && c.colors.includes(communityColor));
+      const matchesRarity = communityRarity === 'ALL' || c.rarity.toLowerCase() === communityRarity.toLowerCase();
+      return matchesSearch && matchesColor && matchesRarity;
+    });
+  }, [selectedPlayerCards, communitySearchTerm, communityColor, communityRarity]);
+
+  // Trade Calculator Totals
   const offeredTotal = offeredCards.reduce((acc, c) => acc + (parseSafeNumber(c.price, 0) * (c.tradeQty || 1)), 0).toFixed(2);
   const requestedTotal = requestedCards.reduce((acc, c) => acc + (parseSafeNumber(c.price, 0) * (c.tradeQty || 1)), 0).toFixed(2);
   const tradeDelta = (offeredTotal - requestedTotal).toFixed(2);
@@ -407,11 +505,25 @@ export default function App() {
             </div>
             <h1 className="text-2xl font-bold text-white">Goober box</h1>
             <p className="text-sm text-gray-400">
-              {isRegistering ? 'Create an account to manage your MTG deck' : 'Sign in to access your Goober box'}
+              {isRegistering ? 'Create a Goober box account to trade & manage cards' : 'Sign in to access your Goober box'}
             </p>
           </div>
 
           <form onSubmit={handleAuth} className="space-y-4">
+            {isRegistering && (
+              <div>
+                <label className="text-xs text-gray-400 font-medium">Community Username</label>
+                <input
+                  type="text"
+                  required
+                  value={usernameInput}
+                  onChange={(e) => setUsernameInput(e.target.value)}
+                  placeholder="e.g. GooberKing99"
+                  className="w-full bg-gray-950 border border-gray-800 rounded-xl px-4 py-2.5 text-sm text-white focus:outline-none focus:border-indigo-500 mt-1"
+                />
+              </div>
+            )}
+
             <div>
               <label className="text-xs text-gray-400 font-medium">Email Address</label>
               <input
@@ -445,7 +557,7 @@ export default function App() {
               className="w-full py-3 bg-indigo-600 hover:bg-indigo-500 text-white font-medium text-sm rounded-xl transition shadow-lg shadow-indigo-600/20 flex items-center justify-center gap-2"
             >
               {isRegistering ? <UserPlus className="w-4 h-4" /> : <LogIn className="w-4 h-4" />}
-              {isRegistering ? 'Create Account' : 'Sign In'}
+              {isRegistering ? 'Create Account & Username' : 'Sign In'}
             </button>
           </form>
 
@@ -478,7 +590,18 @@ export default function App() {
               <h1 className="text-xl font-bold bg-gradient-to-r from-indigo-400 to-purple-400 bg-clip-text text-transparent">
                 Goober box
               </h1>
-              <p className="text-xs text-gray-400">Signed in as <span className="text-indigo-300">{user.email}</span></p>
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-gray-400">
+                  Tag: <strong className="text-indigo-300">@{userProfile?.username || 'GooberPlayer'}</strong>
+                </span>
+                <button
+                  onClick={() => setIsEditingUsername(true)}
+                  className="text-gray-500 hover:text-indigo-400 transition"
+                  title="Change Community Tag"
+                >
+                  <Edit3 className="w-3.5 h-3.5" />
+                </button>
+              </div>
             </div>
           </div>
 
@@ -509,12 +632,15 @@ export default function App() {
                 <ArrowLeftRight className="w-4 h-4" /> Trade Calculator
               </button>
               <button
-                onClick={() => setActiveTab('community')}
+                onClick={() => {
+                  setActiveTab('community');
+                  setSelectedPlayer(null);
+                }}
                 className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition ${
                   activeTab === 'community' ? 'bg-indigo-600 text-white shadow-md' : 'text-gray-400 hover:text-gray-200'
                 }`}
               >
-                <Sparkles className="w-4 h-4" /> Community
+                <Users className="w-4 h-4" /> Community
               </button>
             </nav>
 
@@ -529,13 +655,44 @@ export default function App() {
         </div>
       </header>
 
+      {/* Edit Username Modal */}
+      {isEditingUsername && (
+        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+          <div className="bg-gray-900 border border-gray-800 rounded-2xl p-6 max-w-sm w-full space-y-4">
+            <div className="flex justify-between items-center">
+              <h3 className="font-bold text-white text-base">Change Goober Box Tag</h3>
+              <button onClick={() => setIsEditingUsername(false)} className="text-gray-400 hover:text-white">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <form onSubmit={handleUpdateUsername} className="space-y-4">
+              <div>
+                <label className="text-xs text-gray-400">New Username</label>
+                <input
+                  type="text"
+                  required
+                  defaultValue={userProfile?.username}
+                  onChange={(e) => setNewUsername(e.target.value)}
+                  className="w-full bg-gray-950 border border-gray-800 rounded-xl px-4 py-2 text-sm text-white focus:outline-none focus:border-indigo-500 mt-1"
+                />
+              </div>
+              <button
+                type="submit"
+                className="w-full py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white font-medium text-sm rounded-xl transition shadow"
+              >
+                Save New Username
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
+
       {/* Main Content Area */}
       <main className="max-w-7xl mx-auto px-4 py-8">
         
         {/* TAB 1: PERSONAL COLLECTION */}
         {activeTab === 'collection' && (
           <div className="space-y-6">
-            {/* Analytics Metric Cards */}
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
               <div className="bg-gray-900/90 border border-gray-800 p-5 rounded-2xl flex items-center gap-4">
                 <div className="p-3 bg-indigo-500/10 text-indigo-400 rounded-xl">
@@ -568,7 +725,6 @@ export default function App() {
               </div>
             </div>
 
-            {/* Filter and View Controls Bar */}
             <div className="bg-gray-900 border border-gray-800 p-4 rounded-2xl flex flex-col md:flex-row gap-4 justify-between items-center">
               <div className="relative w-full md:w-96">
                 <Search className="w-4 h-4 absolute left-3 top-3 text-gray-500" />
@@ -624,7 +780,6 @@ export default function App() {
               </div>
             </div>
 
-            {/* Collection Grid / List Display */}
             {loading ? (
               <div className="text-center py-20 text-gray-500">Loading your collection...</div>
             ) : filteredCards.length === 0 ? (
@@ -721,7 +876,6 @@ export default function App() {
         {/* TAB 2: ADD & ART VARIANT PICKER / CSV DECK IMPORT */}
         {activeTab === 'add' && (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-            {/* Scryfall Art & Printing Variant Picker */}
             <div className="bg-gray-900 border border-gray-800 p-6 rounded-2xl space-y-4">
               <h2 className="text-lg font-bold text-white flex items-center gap-2">
                 <Search className="w-5 h-5 text-indigo-400" /> Search & Select Art / Printing
@@ -752,7 +906,6 @@ export default function App() {
                 )}
               </div>
 
-              {/* Printing & Art Selector Grid */}
               {availablePrintings.length > 0 && (
                 <div className="space-y-4 pt-2">
                   <h3 className="text-xs font-bold text-gray-400 uppercase tracking-wider flex items-center gap-1">
@@ -836,7 +989,6 @@ export default function App() {
               )}
             </div>
 
-            {/* CSV Deck & Bulk Import */}
             <div className="bg-gray-900 border border-gray-800 p-6 rounded-2xl space-y-4">
               <h2 className="text-lg font-bold text-white flex items-center gap-2">
                 <Upload className="w-5 h-5 text-indigo-400" /> Deck & CSV Bulk Importer
@@ -942,69 +1094,193 @@ export default function App() {
           </div>
         )}
 
-        {/* TAB 4: COMMUNITY VAULTS */}
+        {/* TAB 4: COMMUNITY PLAYER DIRECTORY & VAULT INSPECTOR */}
         {activeTab === 'community' && (
           <div className="space-y-6">
-            <div className="bg-gray-900 border border-gray-800 p-6 rounded-2xl flex flex-col md:flex-row justify-between items-center gap-4">
-              <div>
-                <h2 className="text-lg font-bold text-white">Community Vaults</h2>
-                <p className="text-xs text-gray-400">Browse other players' collections to find cards for trading.</p>
-              </div>
+            {!selectedPlayer ? (
+              // VIEW 1: USER DIRECTORY
+              <div className="space-y-6">
+                <div className="bg-gray-900 border border-gray-800 p-6 rounded-2xl flex flex-col md:flex-row justify-between items-center gap-4">
+                  <div>
+                    <h2 className="text-lg font-bold text-white flex items-center gap-2">
+                      <Users className="w-5 h-5 text-indigo-400" /> Goober Box Players
+                    </h2>
+                    <p className="text-xs text-gray-400">Click on any player tag to view their public collection.</p>
+                  </div>
 
-              <select
-                value={selectedUserFilter}
-                onChange={(e) => setSelectedUserFilter(e.target.value)}
-                className="bg-gray-950 border border-gray-800 rounded-xl px-4 py-2 text-sm text-gray-300 focus:outline-none focus:border-indigo-500"
-              >
-                <option value="ALL">All Players' Collections</option>
-                {Array.from(new Set(allPublicCards.map((c) => c.userId))).map((uid) => (
-                  <option key={uid} value={uid}>
-                    Player ID: {uid ? uid.substring(0, 8) : 'Unknown'}...
-                  </option>
-                ))}
-              </select>
-            </div>
+                  <div className="relative w-full md:w-80">
+                    <Search className="w-4 h-4 absolute left-3 top-3 text-gray-500" />
+                    <input
+                      type="text"
+                      placeholder="Search player tags..."
+                      value={playerSearchTerm}
+                      onChange={(e) => setPlayerSearchTerm(e.target.value)}
+                      className="w-full bg-gray-950 border border-gray-800 rounded-xl pl-9 pr-4 py-2 text-sm text-white focus:outline-none focus:border-indigo-500"
+                    />
+                  </div>
+                </div>
 
-            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4">
-              {allPublicCards
-                .filter((card) => selectedUserFilter === 'ALL' || card.userId === selectedUserFilter)
-                .map((card) => (
-                  <div key={card.id} className="bg-gray-900 border border-gray-800 rounded-2xl overflow-hidden flex flex-col justify-between">
-                    <div className="relative">
-                      <img 
-                        src={card.imageUrl || 'https://cards.scryfall.io/back.jpg'} 
-                        alt={card.name} 
-                        className="w-full h-auto object-cover"
-                        loading="lazy"
-                      />
-                      <div className="absolute top-2 right-2 bg-gray-950/80 backdrop-blur text-xs px-2 py-1 rounded-lg font-bold border border-gray-700 text-indigo-300">
-                        x{card.quantity}
-                      </div>
-                      {card.isFoil && (
-                        <div className="absolute top-2 left-2 bg-gradient-to-r from-amber-400 to-yellow-200 text-gray-950 text-[10px] font-black px-1.5 py-0.5 rounded shadow">
-                          FOIL
+                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+                  {communityUsers
+                    .filter(u => (u.username || '').toLowerCase().includes(playerSearchTerm.toLowerCase()))
+                    .map((player) => {
+                      const playerCards = allPublicCards.filter(c => c.userId === player.uid);
+                      const playerTotalCount = playerCards.reduce((sum, c) => sum + (Number(c.quantity) || 1), 0);
+                      const playerVal = playerCards.reduce((sum, c) => sum + ((Number(c.quantity) || 1) * parseSafeNumber(c.price, 0)), 0).toFixed(2);
+                      const isCurrentUser = player.uid === user.uid;
+
+                      return (
+                        <div
+                          key={player.uid}
+                          onClick={() => setSelectedPlayer(player)}
+                          className={`bg-gray-900 border rounded-2xl p-5 hover:border-indigo-500 cursor-pointer transition flex flex-col justify-between group ${
+                            isCurrentUser ? 'border-indigo-500/50 bg-indigo-950/20' : 'border-gray-800'
+                          }`}
+                        >
+                          <div className="space-y-3">
+                            <div className="flex items-center gap-3">
+                              <div className="p-3 bg-indigo-600/20 text-indigo-400 rounded-xl border border-indigo-500/30">
+                                <User className="w-6 h-6" />
+                              </div>
+                              <div>
+                                <h3 className="font-bold text-white text-base group-hover:text-indigo-300 transition">
+                                  @{player.username || 'GooberPlayer'}
+                                </h3>
+                                <p className="text-[10px] text-gray-500 truncate">{player.email}</p>
+                              </div>
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-2 text-xs pt-2 border-t border-gray-800/80">
+                              <div className="bg-gray-950 p-2 rounded-lg border border-gray-800/60">
+                                <span className="text-gray-500 text-[10px] uppercase font-bold block">Cards</span>
+                                <span className="font-bold text-white">{playerTotalCount}</span>
+                              </div>
+                              <div className="bg-gray-950 p-2 rounded-lg border border-gray-800/60">
+                                <span className="text-gray-500 text-[10px] uppercase font-bold block">Vault Value</span>
+                                <span className="font-bold text-emerald-400">${playerVal}</span>
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="mt-4 pt-2 text-center text-xs font-semibold text-indigo-400 group-hover:text-indigo-300 flex items-center justify-center gap-1">
+                            Inspect Collection $\rightarrow$
+                          </div>
                         </div>
-                      )}
-                    </div>
-
-                    <div className="p-3 space-y-2">
-                      <div>
-                        <h3 className="text-sm font-bold text-white line-clamp-1">{card.name}</h3>
-                        <p className="text-xs text-gray-400">{card.setName}</p>
-                      </div>
-
-                      <div className="flex justify-between items-center text-xs">
-                        {renderManaBadges(card.colors)}
-                        <span className="font-semibold text-emerald-400">${parseSafeNumber(card.price, 0).toFixed(2)}</span>
-                      </div>
-
-                      <div className="mt-2 text-[10px] text-gray-500 text-center border-t border-gray-800/80 pt-1">
-                        Owner: {card.userId === user?.uid ? 'You' : `Player ${card.userId?.substring(0, 6)}`}
-                      </div>
+                      );
+                    })}
+                </div>
+              </div>
+            ) : (
+              // VIEW 2: INSPECTING A PLAYER'S VAULT
+              <div className="space-y-6">
+                <div className="bg-gray-900 border border-gray-800 p-6 rounded-2xl flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+                  <div className="flex items-center gap-4">
+                    <button
+                      onClick={() => setSelectedPlayer(null)}
+                      className="p-2 bg-gray-800 hover:bg-gray-700 text-white rounded-xl transition flex items-center gap-1 text-xs font-medium"
+                    >
+                      <ArrowLeft className="w-4 h-4" /> Back to Players
+                    </button>
+                    <div>
+                      <h2 className="text-xl font-bold text-white">
+                        @{selectedPlayer.username || 'GooberPlayer'}'s Collection
+                      </h2>
+                      <p className="text-xs text-gray-400">Browsing public cards for trade ideas.</p>
                     </div>
                   </div>
-                ))}
-            </div>
+
+                  <div className="flex items-center gap-3">
+                    <div className="bg-gray-950 px-3 py-1.5 rounded-xl border border-gray-800 text-xs">
+                      <span className="text-gray-400">Total Cards: </span>
+                      <strong className="text-white">{selectedPlayerCards.reduce((sum, c) => sum + (Number(c.quantity) || 1), 0)}</strong>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Filters Bar for Inspector */}
+                <div className="bg-gray-900 border border-gray-800 p-4 rounded-2xl flex flex-col md:flex-row gap-4 justify-between items-center">
+                  <div className="relative w-full md:w-96">
+                    <Search className="w-4 h-4 absolute left-3 top-3 text-gray-500" />
+                    <input
+                      type="text"
+                      placeholder="Search player's cards..."
+                      value={communitySearchTerm}
+                      onChange={(e) => setCommunitySearchTerm(e.target.value)}
+                      className="w-full bg-gray-950 border border-gray-800 rounded-xl pl-9 pr-4 py-2 text-sm focus:outline-none focus:border-indigo-500 text-white"
+                    />
+                  </div>
+
+                  <div className="flex flex-wrap gap-3 w-full md:w-auto">
+                    <select
+                      value={communityColor}
+                      onChange={(e) => setCommunityColor(e.target.value)}
+                      className="bg-gray-950 border border-gray-800 rounded-xl px-3 py-2 text-sm text-gray-300 focus:outline-none focus:border-indigo-500"
+                    >
+                      <option value="ALL">All Colors</option>
+                      <option value="W">White</option>
+                      <option value="U">Blue</option>
+                      <option value="B">Black</option>
+                      <option value="R">Red</option>
+                      <option value="G">Green</option>
+                    </select>
+
+                    <select
+                      value={communityRarity}
+                      onChange={(e) => setCommunityRarity(e.target.value)}
+                      className="bg-gray-950 border border-gray-800 rounded-xl px-3 py-2 text-sm text-gray-300 focus:outline-none focus:border-indigo-500"
+                    >
+                      <option value="ALL">All Rarities</option>
+                      <option value="common">Common</option>
+                      <option value="uncommon">Uncommon</option>
+                      <option value="rare">Rare</option>
+                      <option value="mythic">Mythic</option>
+                    </select>
+                  </div>
+                </div>
+
+                {/* Player Cards Display */}
+                {filteredCommunityPlayerCards.length === 0 ? (
+                  <div className="text-center py-20 border border-dashed border-gray-800 rounded-2xl bg-gray-900/40">
+                    <p className="text-gray-400 font-medium">This player has no cards matching the selected filters.</p>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4">
+                    {filteredCommunityPlayerCards.map((card) => (
+                      <div key={card.id} className="bg-gray-900 border border-gray-800 rounded-2xl overflow-hidden flex flex-col justify-between">
+                        <div className="relative">
+                          <img 
+                            src={card.imageUrl || 'https://cards.scryfall.io/back.jpg'} 
+                            alt={card.name} 
+                            className="w-full h-auto object-cover"
+                            loading="lazy"
+                          />
+                          <div className="absolute top-2 right-2 bg-gray-950/80 backdrop-blur text-xs px-2 py-1 rounded-lg font-bold border border-gray-700 text-indigo-300">
+                            x{card.quantity}
+                          </div>
+                          {card.isFoil && (
+                            <div className="absolute top-2 left-2 bg-gradient-to-r from-amber-400 to-yellow-200 text-gray-950 text-[10px] font-black px-1.5 py-0.5 rounded shadow">
+                              FOIL
+                            </div>
+                          )}
+                        </div>
+
+                        <div className="p-3 space-y-2">
+                          <div>
+                            <h3 className="text-sm font-bold text-white line-clamp-1">{card.name}</h3>
+                            <p className="text-xs text-gray-400">{card.setName}</p>
+                          </div>
+
+                          <div className="flex justify-between items-center text-xs">
+                            {renderManaBadges(card.colors)}
+                            <span className="font-semibold text-emerald-400">${parseSafeNumber(card.price, 0).toFixed(2)}</span>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         )}
       </main>
