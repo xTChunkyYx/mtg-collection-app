@@ -41,7 +41,8 @@ import {
   Users,
   ArrowLeft,
   Edit3,
-  X
+  X,
+  FileSpreadsheet
 } from 'lucide-react';
 
 // 1. Firebase Configuration
@@ -81,7 +82,7 @@ const renderManaBadges = (colors = []) => {
   );
 };
 
-// Clean currency and numeric strings safely to avoid math bugs
+// Clean currency and numeric strings safely to avoid calculation errors
 const parseSafeNumber = (val, fallback = 0) => {
   if (typeof val === 'number') return isNaN(val) ? fallback : val;
   if (!val) return fallback;
@@ -116,7 +117,7 @@ export default function App() {
   const [selectedPlayer, setSelectedPlayer] = useState(null);
   const [playerSearchTerm, setPlayerSearchTerm] = useState('');
 
-  // Search & Filters for Personal Collection
+  // Personal Search & Filters
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedColor, setSelectedColor] = useState('ALL');
   const [selectedRarity, setSelectedRarity] = useState('ALL');
@@ -258,7 +259,6 @@ export default function App() {
     }
   };
 
-  // Fixed Username Update Handler
   const handleUpdateUsername = async (e) => {
     e.preventDefault();
     if (!newUsername.trim() || !user) return;
@@ -322,7 +322,7 @@ export default function App() {
     }
   };
 
-  // Add Card to Firestore
+  // Add Single Card to Firestore
   const handleAddCardToCollection = async () => {
     if (!selectedPrinting || !user) return;
 
@@ -375,17 +375,17 @@ export default function App() {
     await deleteDoc(doc(db, 'cards', cardId));
   };
 
-  // CSV Deck Importer
-  const handleCsvImport = async () => {
-    if (!csvText.trim() || !user) return;
-    setImportStatus('Parsing deck & collection entries...');
-    
-    const lines = csvText.trim().split(/\r\n|\n/);
+  // --- CORE CSV PARSER (Handles Daveon's Binder CSV, ManaBox, Moxfield, TCGPlayer) ---
+  const processCsvContent = async (rawText) => {
+    if (!rawText || !rawText.trim() || !user) return;
+    setImportStatus('Processing CSV cards into your Goober box...');
+
+    const lines = rawText.trim().split(/\r\n|\n/);
     if (lines.length === 0) return;
 
     let addedCount = 0;
     const headerLine = lines[0].toLowerCase();
-    const hasHeaders = headerLine.includes('name') || headerLine.includes('card') || headerLine.includes('count');
+    const hasHeaders = headerLine.includes('name') || headerLine.includes('card') || headerLine.includes('count') || headerLine.includes('edition');
     
     const startIndex = hasHeaders ? 1 : 0;
     let headers = [];
@@ -402,7 +402,9 @@ export default function App() {
       let setName = 'Imported Set';
       let price = 0.50;
       let isFoilEntry = false;
+      let rarity = 'rare';
 
+      // Safe CSV split supporting quoted string fields
       const parts = line.match(/(".*?"|[^",\s]+)(?=\s*,|\s*$)/g) || line.split(',');
       const cleanParts = parts.map(p => p.trim().replace(/^"|"$/g, ''));
 
@@ -418,13 +420,14 @@ export default function App() {
         name = getCol(['name', 'card']);
         quantity = parseSafeNumber(getCol(['count', 'qty', 'quantity']), 1);
         setName = getCol(['set', 'edition']) || 'Imported Set';
-        price = parseSafeNumber(getCol(['price', 'usd', 'value', 'market']), 0.50);
+        price = parseSafeNumber(getCol(['price', 'usd', 'value', 'market', 'purchase price']), 0.50);
+        rarity = getCol(['rarity']) || 'rare';
         const foilVal = getCol(['foil', 'finish']).toLowerCase();
         isFoilEntry = foilVal.includes('foil') || foilVal === 'yes' || foilVal === 'true';
       } else {
         name = cleanParts[0];
         quantity = parseSafeNumber(cleanParts[1], 1);
-        setName = cleanParts[2] || 'Imported Deck';
+        setName = cleanParts[2] || 'Imported Binder';
         price = parseSafeNumber(cleanParts[3], 0.50);
       }
 
@@ -437,8 +440,8 @@ export default function App() {
           quantity: quantity,
           price: price,
           colors: ['C'],
-          rarity: 'rare',
-          typeLine: 'Deck Card',
+          rarity: rarity.toLowerCase(),
+          typeLine: 'Imported Card',
           imageUrl: 'https://cards.scryfall.io/back.jpg',
           isFoil: isFoilEntry,
           addedAt: new Date().toISOString()
@@ -447,9 +450,24 @@ export default function App() {
       }
     }
 
-    setImportStatus(`Successfully imported ${addedCount} deck entries!`);
+    setImportStatus(`Successfully imported ${addedCount} card entries from CSV!`);
     setCsvText('');
-    setTimeout(() => setImportStatus(''), 4000);
+    setTimeout(() => setImportStatus(''), 4500);
+  };
+
+  // Handler for File Input Selection (.csv file picker)
+  const handleFileSelect = (event) => {
+    const file = event.target.files[0];
+    if (!file) return;
+
+    setImportStatus(`Reading file "${file.name}"...`);
+    const reader = new FileReader();
+    reader.onload = async (e) => {
+      const text = e.target.result;
+      await processCsvContent(text);
+    };
+    reader.readAsText(file);
+    event.target.value = ''; // Reset file input so user can re-upload if needed
   };
 
   // Personal Filtered Cards
@@ -878,9 +896,10 @@ export default function App() {
           </div>
         )}
 
-        {/* TAB 2: ADD & ART VARIANT PICKER / CSV DECK IMPORT */}
+        {/* TAB 2: ADD & ART VARIANT PICKER / CSV FILE & DECK IMPORT */}
         {activeTab === 'add' && (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+            {/* Scryfall Art & Printing Variant Picker */}
             <div className="bg-gray-900 border border-gray-800 p-6 rounded-2xl space-y-4">
               <h2 className="text-lg font-bold text-white flex items-center gap-2">
                 <Search className="w-5 h-5 text-indigo-400" /> Search & Select Art / Printing
@@ -994,17 +1013,43 @@ export default function App() {
               )}
             </div>
 
+            {/* CSV File Upload & Text Import Section */}
             <div className="bg-gray-900 border border-gray-800 p-6 rounded-2xl space-y-4">
               <h2 className="text-lg font-bold text-white flex items-center gap-2">
-                <Upload className="w-5 h-5 text-indigo-400" /> Deck & CSV Bulk Importer
+                <Upload className="w-5 h-5 text-indigo-400" /> Import CSV File / Binder
               </h2>
               <p className="text-xs text-gray-400">
-                Paste CSV content exported from Moxfield, Archidekt, ManaBox, or TCGPlayer. Format: <code className="text-indigo-300">Name, Quantity, Set, Price</code>
+                Select a CSV file from your computer or paste text content. Works with Daveon's binder exports, Moxfield, ManaBox, or Archidekt CSVs.
               </p>
 
+              {/* CSV File Select Button */}
+              <div className="border-2 border-dashed border-gray-800 hover:border-indigo-500 transition rounded-xl p-6 text-center bg-gray-950/60">
+                <input
+                  type="file"
+                  accept=".csv"
+                  id="csvFileInput"
+                  onChange={handleFileSelect}
+                  className="hidden"
+                />
+                <label htmlFor="csvFileInput" className="cursor-pointer space-y-2 block">
+                  <FileSpreadsheet className="w-10 h-10 text-indigo-400 mx-auto" />
+                  <span className="text-sm font-semibold text-indigo-300 block">
+                    Select CSV File from Computer
+                  </span>
+                  <span className="text-xs text-gray-500 block">
+                    Supports .csv exports with headers (Name, Count, Edition, Price, Foil)
+                  </span>
+                </label>
+              </div>
+
+              <div className="relative flex items-center justify-center my-2">
+                <div className="border-t border-gray-800 w-full"></div>
+                <span className="bg-gray-900 px-3 text-xs text-gray-500 uppercase font-bold absolute">OR PASTE RAW CSV</span>
+              </div>
+
               <textarea
-                rows="10"
-                placeholder="Lightning Bolt, 4, Secret Lair, 2.50&#10;Counterspell, 2, Dominaria, 1.20&#10;Sol Ring, 1, Commander, 1.80"
+                rows="6"
+                placeholder="Count, Name, Edition, Price, Foil&#10;1, Black Lotus, Unlimited Edition, 12500, false&#10;4, Sol Ring, Commander Masters, 3.50, true"
                 value={csvText}
                 onChange={(e) => setCsvText(e.target.value)}
                 className="w-full bg-gray-950 border border-gray-800 rounded-xl p-3 text-xs font-mono text-gray-200 focus:outline-none focus:border-indigo-500"
@@ -1015,10 +1060,10 @@ export default function App() {
               )}
 
               <button
-                onClick={handleCsvImport}
+                onClick={() => processCsvContent(csvText)}
                 className="w-full py-2.5 bg-gray-800 hover:bg-gray-700 text-white font-medium text-sm rounded-xl transition border border-gray-700"
               >
-                Import Deck / CSV Entries
+                Import Pasted Text Entries
               </button>
             </div>
           </div>
@@ -1103,7 +1148,6 @@ export default function App() {
         {activeTab === 'community' && (
           <div className="space-y-6">
             {!selectedPlayer ? (
-              // VIEW 1: USER DIRECTORY
               <div className="space-y-6">
                 <div className="bg-gray-900 border border-gray-800 p-6 rounded-2xl flex flex-col md:flex-row justify-between items-center gap-4">
                   <div>
@@ -1176,7 +1220,6 @@ export default function App() {
                 </div>
               </div>
             ) : (
-              // VIEW 2: INSPECTING A PLAYER'S VAULT
               <div className="space-y-6">
                 <div className="bg-gray-900 border border-gray-800 p-6 rounded-2xl flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
                   <div className="flex items-center gap-4">
@@ -1202,7 +1245,6 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* Filters Bar for Inspector */}
                 <div className="bg-gray-900 border border-gray-800 p-4 rounded-2xl flex flex-col md:flex-row gap-4 justify-between items-center">
                   <div className="relative w-full md:w-96">
                     <Search className="w-4 h-4 absolute left-3 top-3 text-gray-500" />
@@ -1243,7 +1285,6 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* Player Cards Display */}
                 {filteredCommunityPlayerCards.length === 0 ? (
                   <div className="text-center py-20 border border-dashed border-gray-800 rounded-2xl bg-gray-900/40">
                     <p className="text-gray-400 font-medium">This player has no cards matching the selected filters.</p>
