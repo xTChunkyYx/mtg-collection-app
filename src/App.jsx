@@ -378,7 +378,50 @@ export default function App() {
     await deleteDoc(doc(db, 'cards', cardId));
   };
 
-  // CSV Parser & Auto Art Fetcher
+  // --- REFINED CSV LINE PARSER ---
+  const parseCsvLine = (line) => {
+    const result = [];
+    let current = '';
+    let inQuotes = false;
+    
+    for (let i = 0; i < line.length; i++) {
+      const char = line[i];
+      if (char === '"') {
+        if (inQuotes && line[i + 1] === '"') {
+          current += '"';
+          i++;
+        } else {
+          inQuotes = !inQuotes;
+        }
+      } else if (char === ',' && !inQuotes) {
+        result.push(current.trim());
+        current = '';
+      } else {
+        current += char;
+      }
+    }
+    result.push(current.trim());
+    return result;
+  };
+
+  const getColValue = (rowParts, headers, possibleKeys) => {
+    // 1. Exact match search first
+    for (const key of possibleKeys) {
+      const exactIdx = headers.findIndex(h => h === key);
+      if (exactIdx !== -1 && rowParts[exactIdx] !== undefined) {
+        return rowParts[exactIdx].replace(/^"|"$/g, '').trim();
+      }
+    }
+    // 2. Substring match fallback
+    for (const key of possibleKeys) {
+      const partialIdx = headers.findIndex(h => h.includes(key));
+      if (partialIdx !== -1 && rowParts[partialIdx] !== undefined) {
+        return rowParts[partialIdx].replace(/^"|"$/g, '').trim();
+      }
+    }
+    return '';
+  };
+
   const processCsvContent = async (rawText, fileName = '') => {
     if (!rawText || !rawText.trim() || !user || isImporting) return;
     setIsImporting(true);
@@ -389,63 +432,57 @@ export default function App() {
       if (lines.length === 0) return;
 
       let addedCount = 0;
+      const parsedHeaderRow = parseCsvLine(lines[0]);
       const headerLine = lines[0].toLowerCase();
       const hasHeaders = headerLine.includes('name') || headerLine.includes('card') || headerLine.includes('count') || headerLine.includes('edition');
       
       const startIndex = hasHeaders ? 1 : 0;
-      let headers = [];
-      if (hasHeaders) {
-        headers = lines[0].split(',').map(h => h.trim().replace(/^"|"$/g, '').toLowerCase());
-      }
+      const headers = hasHeaders ? parsedHeaderRow.map(h => h.toLowerCase().trim().replace(/^"|"$/g, '')) : [];
 
       for (let i = startIndex; i < lines.length; i++) {
         const line = lines[i].trim();
         if (!line) continue;
 
+        const rowParts = parseCsvLine(line);
+        if (rowParts.length === 0 || !rowParts[0]) continue;
+
         let name = '';
         let quantity = 1;
         let setName = 'Imported Set';
-        let setCode = 'CSV';
+        let setCode = '';
         let price = 0.50;
         let isFoilEntry = false;
         let rarity = 'rare';
 
-        const parts = line.match(/(".*?"|[^",\s]+)(?=\s*,|\s*$)/g) || line.split(',');
-        const cleanParts = parts.map(p => p.trim().replace(/^"|"$/g, ''));
-
         if (hasHeaders) {
-          const getCol = (keys) => {
-            for (let k of keys) {
-              const idx = headers.findIndex(h => h.includes(k));
-              if (idx !== -1 && cleanParts[idx] !== undefined) return cleanParts[idx];
-            }
-            return '';
-          };
-
-          name = getCol(['name', 'card']);
-          quantity = parseSafeNumber(getCol(['count', 'qty', 'quantity']), 1);
-          setName = getCol(['set', 'edition']) || 'Imported Set';
-          setCode = getCol(['set code', 'code']) || 'CSV';
-          price = parseSafeNumber(getCol(['price', 'usd', 'value', 'market', 'purchase price']), 0.50);
-          rarity = getCol(['rarity']) || 'rare';
-          const foilVal = getCol(['foil', 'finish']).toLowerCase();
-          isFoilEntry = foilVal.includes('foil') || foilVal === 'yes' || foilVal === 'true';
+          name = getColValue(rowParts, headers, ['name', 'card name', 'product name', 'card']);
+          quantity = parseSafeNumber(getColValue(rowParts, headers, ['count', 'qty', 'quantity', 'amount']), 1);
+          setCode = getColValue(rowParts, headers, ['edition code', 'set code', 'code']);
+          setName = getColValue(rowParts, headers, ['edition', 'set name', 'set', 'expansion']) || 'Imported Set';
+          price = parseSafeNumber(getColValue(rowParts, headers, ['price', 'usd', 'value', 'market', 'purchase price']), 0.50);
+          rarity = getColValue(rowParts, headers, ['rarity']) || 'rare';
+          const foilVal = getColValue(rowParts, headers, ['foil', 'finish']).toLowerCase();
+          isFoilEntry = foilVal.includes('foil') || foilVal === 'yes' || foilVal === 'true' || foilVal === '1';
         } else {
-          name = cleanParts[0];
-          quantity = parseSafeNumber(cleanParts[1], 1);
-          setName = cleanParts[2] || 'Imported Binder';
-          price = parseSafeNumber(cleanParts[3], 0.50);
+          name = rowParts[0].replace(/^"|"$/g, '').trim();
+          quantity = parseSafeNumber(rowParts[1], 1);
+          setName = rowParts[2] ? rowParts[2].replace(/^"|"$/g, '').trim() : 'Imported Binder';
+          price = parseSafeNumber(rowParts[3], 0.50);
         }
 
         if (name && !isNaN(quantity) && quantity > 0) {
-          // Dynamic Scryfall artwork redirect endpoint
-          const imageUrl = `https://api.scryfall.com/cards/named?fuzzy=${encodeURIComponent(name)}&format=image`;
+          let imageUrl = '';
+          if (setCode && setCode.length >= 3 && setCode.length <= 5) {
+            imageUrl = `https://api.scryfall.com/cards/named?exact=${encodeURIComponent(name)}&set=${encodeURIComponent(setCode.toLowerCase())}&format=image`;
+          } else {
+            imageUrl = `https://api.scryfall.com/cards/named?exact=${encodeURIComponent(name)}&format=image`;
+          }
 
           await addDoc(collection(db, 'cards'), {
             userId: user.uid,
             name: name,
             setName: setName,
-            setCode: setCode,
+            setCode: setCode || 'CSV',
             quantity: quantity,
             price: price,
             colors: ['C'],
@@ -459,7 +496,6 @@ export default function App() {
         }
       }
 
-      // Clear text box & file input on success to prevent multi-upload
       setCsvText('');
       if (fileInputRef.current) {
         fileInputRef.current.value = '';
@@ -840,7 +876,7 @@ export default function App() {
                   <div key={card.id} className="bg-gray-900 border border-gray-800 rounded-2xl overflow-hidden group hover:border-gray-700 transition flex flex-col justify-between">
                     <div className="relative bg-gray-950 aspect-[2.5/3.5] overflow-hidden">
                       <img 
-                        src={card.imageUrl || `https://api.scryfall.com/cards/named?fuzzy=${encodeURIComponent(card.name)}&format=image`} 
+                        src={card.imageUrl || `https://api.scryfall.com/cards/named?exact=${encodeURIComponent(card.name)}&format=image`} 
                         alt={card.name} 
                         className="w-full h-full object-cover group-hover:scale-105 transition duration-300"
                         loading="lazy"
@@ -1337,7 +1373,7 @@ export default function App() {
                       <div key={card.id} className="bg-gray-900 border border-gray-800 rounded-2xl overflow-hidden flex flex-col justify-between">
                         <div className="relative bg-gray-950 aspect-[2.5/3.5] overflow-hidden">
                           <img 
-                            src={card.imageUrl || `https://api.scryfall.com/cards/named?fuzzy=${encodeURIComponent(card.name)}&format=image`} 
+                            src={card.imageUrl || `https://api.scryfall.com/cards/named?exact=${encodeURIComponent(card.name)}&format=image`} 
                             alt={card.name} 
                             className="w-full h-full object-cover"
                             loading="lazy"
