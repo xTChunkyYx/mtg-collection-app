@@ -10,7 +10,8 @@ import {
   deleteDoc, 
   onSnapshot,
   query,
-  where 
+  where,
+  writeBatch
 } from 'firebase/firestore';
 import { 
   getAuth, 
@@ -46,7 +47,8 @@ import {
   Loader2,
   FolderOpen,
   FolderPlus,
-  Package
+  Package,
+  RefreshCw
 } from 'lucide-react';
 
 // 1. Firebase Configuration
@@ -234,6 +236,99 @@ class ScryfallRateLimitedQueue {
 }
 
 const scryfallQueue = new ScryfallRateLimitedQueue();
+
+// Batch resolve up to 75 cards at a time using Scryfall's official /cards/collection API
+const batchResolveScryfallCards = async (cardList, onProgress = null) => {
+  if (!cardList || cardList.length === 0) return new Map();
+
+  const resultMap = new Map();
+  const chunks = [];
+  const chunkSize = 75; // Scryfall's official maximum per batch request
+
+  for (let i = 0; i < cardList.length; i += chunkSize) {
+    chunks.push(cardList.slice(i, i + chunkSize));
+  }
+
+  for (let c = 0; c < chunks.length; c++) {
+    const chunk = chunks[c];
+    if (onProgress) {
+      onProgress(Math.round(((c + 1) / chunks.length) * 100), c + 1, chunks.length);
+    }
+
+    const identifiers = chunk.map((item) => {
+      const cleanName = (item.name || '').replace(/^"|"$/g, '').trim();
+      const cleanSet = (item.setCode || '').replace(/[^a-zA-Z0-9]/g, '').trim().toLowerCase();
+      if (cleanSet && cleanSet.length >= 3 && cleanSet.length <= 5 && cleanSet !== 'csv') {
+        return { name: cleanName, set: cleanSet };
+      }
+      return { name: cleanName };
+    });
+
+    try {
+      const res = await fetch('https://api.scryfall.com/cards/collection', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ identifiers })
+      });
+
+      if (res.ok) {
+        const json = await res.json();
+        const foundCards = json.data || [];
+        
+        foundCards.forEach((cardObj) => {
+          const cdnUrl = cardObj.image_uris?.normal || 
+                         cardObj.card_faces?.[0]?.image_uris?.normal || 
+                         cardObj.image_uris?.large || '';
+          
+          if (cdnUrl) {
+            const nameKey = (cardObj.name || '').toLowerCase().trim();
+            const setKey = (cardObj.set || '').toLowerCase().trim();
+            resultMap.set(`${nameKey}_${setKey}`, cdnUrl);
+            if (!resultMap.has(nameKey)) {
+              resultMap.set(nameKey, cdnUrl);
+            }
+            scryfallCdnCache.set(`${nameKey}_${setKey}`, cdnUrl);
+            scryfallCdnCache.set(nameKey, cdnUrl);
+          }
+        });
+
+        // If some cards with a set code failed, retry them by name alone
+        const notFound = json.not_found || [];
+        const retryNames = notFound.filter(nf => nf.name && nf.set).map(nf => ({ name: nf.name }));
+        if (retryNames.length > 0) {
+          try {
+            const retryRes = await fetch('https://api.scryfall.com/cards/collection', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ identifiers: retryNames })
+            });
+            if (retryRes.ok) {
+              const retryJson = await retryRes.json();
+              (retryJson.data || []).forEach((cardObj) => {
+                const cdnUrl = cardObj.image_uris?.normal || 
+                               cardObj.card_faces?.[0]?.image_uris?.normal || '';
+                if (cdnUrl) {
+                  const nameKey = (cardObj.name || '').toLowerCase().trim();
+                  resultMap.set(nameKey, cdnUrl);
+                  scryfallCdnCache.set(nameKey, cdnUrl);
+                }
+              });
+            }
+          } catch (e) {}
+        }
+      }
+    } catch (err) {
+      console.warn('Batch resolve chunk failed:', err);
+    }
+
+    if (c < chunks.length - 1) {
+      await new Promise(r => setTimeout(r, 100)); // Polite pause between batches
+    }
+  }
+
+  debouncedSaveCdnCache();
+  return resultMap;
+};
 
 // Lazy-loading card image with settle delay, rate-limited queue, retry backoff & Firestore auto-healing
 const CardImage = ({ 
@@ -450,6 +545,57 @@ export default function App() {
   // Trade Calculator State
   const [offeredCards, setOfferedCards] = useState([]);
   const [requestedCards, setRequestedCards] = useState([]);
+
+  // Batch Image Sync / Repair State
+  const [isRepairingImages, setIsRepairingImages] = useState(false);
+  const [repairStatus, setRepairStatus] = useState('');
+
+  // Check how many cards need direct CDN image URLs
+  const cardsNeedingRepair = useMemo(() => {
+    return cards.filter(c => !c.imageUrl || !c.imageUrl.includes('cards.scryfall.io'));
+  }, [cards]);
+
+  const handleRepairAllImages = async () => {
+    if (isRepairingImages || !user || cardsNeedingRepair.length === 0) return;
+    setIsRepairingImages(true);
+    setRepairStatus(`Resolving permanent CDN images for ${cardsNeedingRepair.length} cards...`);
+
+    try {
+      const resolvedMap = await batchResolveScryfallCards(cardsNeedingRepair, (pct, current, total) => {
+        setRepairStatus(`Batch resolving images: batch ${current} of ${total} (${pct}%)...`);
+      });
+
+      setRepairStatus('Saving high-speed CDN links to Firestore database...');
+      let updatedCount = 0;
+
+      // Update in chunks of 100 via Firestore writeBatch
+      for (let i = 0; i < cardsNeedingRepair.length; i += 100) {
+        const batch = writeBatch(db);
+        const slice = cardsNeedingRepair.slice(i, i + 100);
+
+        slice.forEach(c => {
+          const cleanName = (c.name || '').toLowerCase().trim();
+          const cleanSet = (c.setCode || '').toLowerCase().trim();
+          const cdnUrl = resolvedMap.get(`${cleanName}_${cleanSet}`) || resolvedMap.get(cleanName);
+
+          if (cdnUrl) {
+            batch.update(doc(db, 'cards', c.id), { imageUrl: cdnUrl });
+            updatedCount++;
+          }
+        });
+
+        await batch.commit();
+      }
+
+      setRepairStatus(`✅ Successfully synced and saved permanent CDN images for ${updatedCount} cards!`);
+    } catch (err) {
+      console.error('Image batch sync failed:', err);
+      setRepairStatus(`❌ Image sync failed: ${err.message}`);
+    } finally {
+      setIsRepairingImages(false);
+      setTimeout(() => setRepairStatus(''), 6000);
+    }
+  };
 
   // 1. Auth Listener
   useEffect(() => {
@@ -739,7 +885,6 @@ export default function App() {
       const lines = rawText.trim().split(/\r\n|\n/);
       if (lines.length === 0) return;
 
-      let addedCount = 0;
       const parsedHeaderRow = parseCsvLine(lines[0]);
       const headerLine = lines[0].toLowerCase();
       const hasHeaders = headerLine.includes('name') || headerLine.includes('card') || headerLine.includes('count') || headerLine.includes('edition');
@@ -747,11 +892,8 @@ export default function App() {
       const startIndex = hasHeaders ? 1 : 0;
       const headers = hasHeaders ? parsedHeaderRow.map(h => h.toLowerCase().trim().replace(/^"|"$/g, '')) : [];
 
-      // Count valid rows first so we can track progress
-      const validLines = lines.slice(startIndex).filter(l => l.trim().length > 0);
-      const totalValid = validLines.length;
-      setImportTotal(totalValid);
-
+      // Step 1: Parse all valid cards from CSV
+      const parsedCards = [];
       for (let i = startIndex; i < lines.length; i++) {
         const line = lines[i].trim();
         if (!line) continue;
@@ -766,6 +908,7 @@ export default function App() {
         let price = 0.50;
         let isFoilEntry = false;
         let rarity = 'rare';
+        let directCdn = '';
 
         if (hasHeaders) {
           name = getColValue(rowParts, headers, ['name', 'card name', 'product name', 'card']);
@@ -776,6 +919,12 @@ export default function App() {
           rarity = getColValue(rowParts, headers, ['rarity']) || 'rare';
           const foilVal = getColValue(rowParts, headers, ['foil', 'finish']).toLowerCase();
           isFoilEntry = foilVal.includes('foil') || foilVal === 'yes' || foilVal === 'true' || foilVal === '1';
+
+          // Check if CSV exports direct Scryfall ID (ManaBox, Moxfield, Archidekt, etc.)
+          const scryId = getColValue(rowParts, headers, ['scryfall id', 'scryfall_id', 'id']);
+          if (scryId && scryId.length === 36) {
+            directCdn = `https://cards.scryfall.io/normal/front/${scryId[0]}/${scryId[1]}/${scryId}.jpg`;
+          }
         } else {
           name = rowParts[0].replace(/^"|"$/g, '').trim();
           quantity = parseSafeNumber(rowParts[1], 1);
@@ -786,30 +935,64 @@ export default function App() {
         if (name && !isNaN(quantity) && quantity > 0) {
           const cleanSet = (setCode && setCode.length >= 3 && setCode.length <= 5 && setCode !== 'CSV') ? setCode.toLowerCase().trim() : '';
           const cacheKey = `${name.toLowerCase().trim()}_${cleanSet}`;
-          const existingCdnUrl = scryfallCdnCache.get(cacheKey) || '';
+          const cachedCdn = directCdn || scryfallCdnCache.get(cacheKey) || scryfallCdnCache.get(name.toLowerCase().trim()) || '';
 
-          await addDoc(collection(db, 'cards'), {
-            userId: user.uid,
-            name: name,
-            setName: setName,
+          parsedCards.push({
+            name,
+            setName,
             setCode: setCode || 'CSV',
-            quantity: quantity,
-            price: price,
-            colors: ['C'],
+            quantity,
+            price,
             rarity: rarity.toLowerCase(),
-            typeLine: 'Imported Card',
-            imageUrl: existingCdnUrl,
             isFoil: isFoilEntry,
-            boxName: targetBox,
-            addedAt: new Date().toISOString()
+            imageUrl: cachedCdn
           });
-          addedCount++;
         }
+      }
 
-        // Update progress after each row
-        const processed = i - startIndex + 1;
+      setImportTotal(parsedCards.length);
+
+      // Step 2: Batch-resolve any missing CDN images via /cards/collection (75 at a time)
+      const needResolution = parsedCards.filter(c => !c.imageUrl);
+      if (needResolution.length > 0) {
+        setImportStatus(`Batch resolving ${needResolution.length} images via Scryfall Batch API (bypassing rate limits)...`);
+        const resolvedMap = await batchResolveScryfallCards(needResolution, (pct) => {
+          setImportProgress(Math.round(pct * 0.4)); // First 40% of progress
+        });
+
+        parsedCards.forEach(c => {
+          if (!c.imageUrl) {
+            const cleanName = c.name.toLowerCase().trim();
+            const cleanSet = c.setCode.toLowerCase().trim();
+            c.imageUrl = resolvedMap.get(`${cleanName}_${cleanSet}`) || resolvedMap.get(cleanName) || '';
+          }
+        });
+      }
+
+      // Step 3: Save cards into Firestore with permanent CDN URLs
+      setImportStatus(`Saving ${parsedCards.length} cards with permanent CDN images...`);
+      let addedCount = 0;
+
+      for (let i = 0; i < parsedCards.length; i++) {
+        const c = parsedCards[i];
+        await addDoc(collection(db, 'cards'), {
+          userId: user.uid,
+          name: c.name,
+          setName: c.setName,
+          setCode: c.setCode,
+          quantity: c.quantity,
+          price: c.price,
+          colors: ['C'],
+          rarity: c.rarity,
+          typeLine: 'Imported Card',
+          imageUrl: c.imageUrl,
+          isFoil: c.isFoil,
+          boxName: targetBox,
+          addedAt: new Date().toISOString()
+        });
+        addedCount++;
         setImportCurrent(addedCount);
-        setImportProgress(Math.round((processed / Math.max(totalValid, 1)) * 100));
+        setImportProgress(40 + Math.round(((i + 1) / parsedCards.length) * 60));
       }
 
       setCsvText('');
@@ -1201,6 +1384,46 @@ export default function App() {
                 </div>
               </div>
             </div>
+
+            {/* Sync Images Banner for cards missing CDN URLs */}
+            {cardsNeedingRepair.length > 0 && (
+              <div className="bg-gradient-to-r from-indigo-950/60 to-purple-950/40 border border-indigo-500/40 rounded-2xl p-4 flex flex-col sm:flex-row items-center justify-between gap-4 shadow-lg shadow-indigo-950/30">
+                <div className="flex items-center gap-3">
+                  <div className="p-2.5 bg-indigo-600/20 text-indigo-400 rounded-xl border border-indigo-500/30">
+                    <Sparkles className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h4 className="text-sm font-bold text-white flex items-center gap-2">
+                      Sync Card Images ({cardsNeedingRepair.length} cards need high-speed CDN links)
+                    </h4>
+                    <p className="text-xs text-gray-400">
+                      Resolves cards in batches of 75 using Scryfall's Collection API to bypass rate limits and save permanent Cloudflare CDN links.
+                    </p>
+                  </div>
+                </div>
+                <button
+                  onClick={handleRepairAllImages}
+                  disabled={isRepairingImages}
+                  className="w-full sm:w-auto px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-semibold transition disabled:opacity-50 flex items-center justify-center gap-2 whitespace-nowrap shadow-lg shadow-indigo-600/30"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${isRepairingImages ? 'animate-spin' : ''}`} />
+                  {isRepairingImages ? 'Syncing...' : `Sync All ${cardsNeedingRepair.length} Images`}
+                </button>
+              </div>
+            )}
+
+            {repairStatus && (
+              <div className={`p-3.5 rounded-xl border text-xs font-semibold flex items-center gap-2 ${
+                repairStatus.includes('❌') 
+                  ? 'bg-red-500/10 border-red-500/30 text-red-400' 
+                  : repairStatus.includes('✅')
+                  ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400'
+                  : 'bg-indigo-500/10 border-indigo-500/30 text-indigo-300'
+              }`}>
+                {isRepairingImages && <Loader2 className="w-4 h-4 animate-spin text-indigo-400" />}
+                {repairStatus}
+              </div>
+            )}
 
             {loading ? (
               <div className="text-center py-20 text-gray-500">Loading your collection...</div>
