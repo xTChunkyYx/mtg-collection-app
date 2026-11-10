@@ -95,13 +95,151 @@ const parseSafeNumber = (val, fallback = 0) => {
   return isNaN(parsed) ? fallback : parsed;
 };
 
-// Lazy-loading card image with IntersectionObserver for reliable off-screen loading
-const CardImage = ({ src, alt, className, fallback = 'https://cards.scryfall.io/back.jpg' }) => {
+// Global Scryfall CDN resolver cache & rate-limited queue to prevent HTTP 429 errors
+const scryfallCdnCache = new Map();
+
+try {
+  const stored = localStorage.getItem('scryfall_cdn_cache_v1');
+  if (stored) {
+    const parsed = JSON.parse(stored);
+    Object.entries(parsed).forEach(([k, v]) => scryfallCdnCache.set(k, v));
+  }
+} catch (e) {}
+
+let saveCacheTimer = null;
+const debouncedSaveCdnCache = () => {
+  if (saveCacheTimer) return;
+  saveCacheTimer = setTimeout(() => {
+    saveCacheTimer = null;
+    try {
+      const obj = {};
+      let count = 0;
+      for (const [k, v] of scryfallCdnCache.entries()) {
+        if (count++ > 2000) break;
+        obj[k] = v;
+      }
+      localStorage.setItem('scryfall_cdn_cache_v1', JSON.stringify(obj));
+    } catch (e) {}
+  }, 1000);
+};
+
+class ScryfallRateLimitedQueue {
+  constructor() {
+    this.queue = [];
+    this.isProcessing = false;
+    this.delayMs = 100; // Scryfall requested 50-100ms spacing between calls
+  }
+
+  enqueue(cardName, setCode, onResolved) {
+    const cleanName = (cardName || '').trim();
+    const cleanSet = (setCode || '').trim().toLowerCase();
+    const cacheKey = `${cleanName.toLowerCase()}_${cleanSet}`;
+
+    // 1. Instant Cache Hit (0ms, 0 API calls)
+    if (scryfallCdnCache.has(cacheKey)) {
+      onResolved(scryfallCdnCache.get(cacheKey));
+      return;
+    }
+
+    // 2. Queue for polite, rate-limited execution
+    this.queue.push({ cleanName, cleanSet, cacheKey, onResolved });
+    if (!this.isProcessing) {
+      this.processNext();
+    }
+  }
+
+  async processNext() {
+    if (this.queue.length === 0) {
+      this.isProcessing = false;
+      return;
+    }
+
+    this.isProcessing = true;
+    const item = this.queue.shift();
+    const { cleanName, cleanSet, cacheKey, onResolved } = item;
+
+    // Check again in case a duplicate was resolved while waiting in queue
+    if (scryfallCdnCache.has(cacheKey)) {
+      onResolved(scryfallCdnCache.get(cacheKey));
+      setTimeout(() => this.processNext(), 10);
+      return;
+    }
+
+    try {
+      let queryUrl = `https://api.scryfall.com/cards/named?exact=${encodeURIComponent(cleanName)}`;
+      if (cleanSet && cleanSet.length >= 3 && cleanSet.length <= 5 && cleanSet !== 'csv') {
+        queryUrl += `&set=${encodeURIComponent(cleanSet)}`;
+      }
+
+      const res = await fetch(queryUrl);
+
+      // Handle 429 Too Many Requests with automatic backoff
+      if (res.status === 429) {
+        console.warn(`Scryfall 429 rate limit hit for "${cleanName}". Backing off 1.8s...`);
+        this.queue.unshift(item); // Re-queue at the front
+        setTimeout(() => this.processNext(), 1800);
+        return;
+      }
+
+      if (res.ok) {
+        const data = await res.json();
+        const directCdnUrl = data.image_uris?.normal || 
+                             data.card_faces?.[0]?.image_uris?.normal || 
+                             'https://cards.scryfall.io/back.jpg';
+        
+        scryfallCdnCache.set(cacheKey, directCdnUrl);
+        debouncedSaveCdnCache();
+        onResolved(directCdnUrl);
+      } else {
+        // Fallback to Scryfall card back so it doesn't stay broken
+        const fallback = 'https://cards.scryfall.io/back.jpg';
+        scryfallCdnCache.set(cacheKey, fallback);
+        onResolved(fallback);
+      }
+    } catch (err) {
+      console.warn(`Failed fetching CDN image for "${cleanName}":`, err);
+      onResolved('https://cards.scryfall.io/back.jpg');
+    }
+
+    // Strict 100ms pause between API calls prevents 429 throttling
+    setTimeout(() => this.processNext(), this.delayMs);
+  }
+}
+
+const scryfallQueue = new ScryfallRateLimitedQueue();
+
+// Lazy-loading card image with CDN resolution, rate-limited queue & Firestore auto-healing
+const CardImage = ({ 
+  src, 
+  alt, 
+  cardName, 
+  setCode, 
+  cardId, 
+  className, 
+  fallback = 'https://cards.scryfall.io/back.jpg' 
+}) => {
   const imgRef = useRef(null);
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState(false);
   const [inView, setInView] = useState(false);
 
+  const cleanName = cardName || alt || '';
+  const cleanSet = setCode || '';
+  const cacheKey = `${cleanName.toLowerCase().trim()}_${cleanSet.toLowerCase().trim()}`;
+
+  // Initial source evaluation:
+  // If already a direct cards.scryfall.io link, use it immediately with zero queueing!
+  const [resolvedUrl, setResolvedUrl] = useState(() => {
+    if (src && !src.includes('api.scryfall.com')) {
+      return src;
+    }
+    if (scryfallCdnCache.has(cacheKey)) {
+      return scryfallCdnCache.get(cacheKey);
+    }
+    return null;
+  });
+
+  // IntersectionObserver to only load cards near viewport
   useEffect(() => {
     const el = imgRef.current;
     if (!el) return;
@@ -112,27 +250,60 @@ const CardImage = ({ src, alt, className, fallback = 'https://cards.scryfall.io/
           observer.disconnect();
         }
       },
-      { rootMargin: '200px' }
+      { rootMargin: '300px' }
     );
     observer.observe(el);
     return () => observer.disconnect();
   }, []);
 
-  const imgSrc = error ? fallback : (inView ? src : undefined);
+  // When card enters view, resolve through the rate-limited queue if not already a direct CDN link
+  useEffect(() => {
+    if (!inView) return;
+
+    // Already direct CDN url
+    if (src && !src.includes('api.scryfall.com')) {
+      setResolvedUrl(src);
+      return;
+    }
+
+    // Check if in cache
+    if (scryfallCdnCache.has(cacheKey)) {
+      const cached = scryfallCdnCache.get(cacheKey);
+      setResolvedUrl(cached);
+      // Auto-heal Firestore record if it still has an api.scryfall.com link
+      if (cardId && src && src.includes('api.scryfall.com') && cached.includes('cards.scryfall.io')) {
+        updateDoc(doc(db, 'cards', cardId), { imageUrl: cached }).catch(() => {});
+      }
+      return;
+    }
+
+    // Queue request through polite 100ms scheduler
+    if (cleanName) {
+      scryfallQueue.enqueue(cleanName, cleanSet, (cdnUrl) => {
+        setResolvedUrl(cdnUrl);
+        // Auto-heal Firestore in background so future visits never call api.scryfall.com again!
+        if (cardId && cdnUrl.includes('cards.scryfall.io')) {
+          updateDoc(doc(db, 'cards', cardId), { imageUrl: cdnUrl }).catch(() => {});
+        }
+      });
+    }
+  }, [inView, src, cleanName, cleanSet, cacheKey, cardId]);
+
+  const finalSrc = error ? fallback : (resolvedUrl || fallback);
 
   return (
     <div ref={imgRef} className={className} style={{ backgroundColor: '#111' }}>
-      {inView && (
+      {inView && resolvedUrl ? (
         <img
-          src={imgSrc}
-          alt={alt}
+          src={finalSrc}
+          alt={alt || cleanName}
           className="w-full h-full object-cover"
           onLoad={() => setLoaded(true)}
           onError={() => setError(true)}
           style={{ opacity: loaded ? 1 : 0, transition: 'opacity 0.3s' }}
         />
-      )}
-      {inView && !loaded && !error && (
+      ) : null}
+      {inView && (!loaded || !resolvedUrl) && !error && (
         <div className="absolute inset-0 flex items-center justify-center">
           <div className="w-6 h-6 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin" />
         </div>
@@ -538,12 +709,9 @@ export default function App() {
         }
 
         if (name && !isNaN(quantity) && quantity > 0) {
-          let imageUrl = '';
-          if (setCode && setCode.length >= 3 && setCode.length <= 5) {
-            imageUrl = `https://api.scryfall.com/cards/named?exact=${encodeURIComponent(name)}&set=${encodeURIComponent(setCode.toLowerCase())}&format=image`;
-          } else {
-            imageUrl = `https://api.scryfall.com/cards/named?exact=${encodeURIComponent(name)}&format=image`;
-          }
+          const cleanSet = (setCode && setCode.length >= 3 && setCode.length <= 5 && setCode !== 'CSV') ? setCode.toLowerCase().trim() : '';
+          const cacheKey = `${name.toLowerCase().trim()}_${cleanSet}`;
+          const existingCdnUrl = scryfallCdnCache.get(cacheKey) || '';
 
           await addDoc(collection(db, 'cards'), {
             userId: user.uid,
@@ -555,7 +723,7 @@ export default function App() {
             colors: ['C'],
             rarity: rarity.toLowerCase(),
             typeLine: 'Imported Card',
-            imageUrl: imageUrl,
+            imageUrl: existingCdnUrl,
             isFoil: isFoilEntry,
             boxName: targetBox,
             addedAt: new Date().toISOString()
@@ -977,7 +1145,10 @@ export default function App() {
                   <div key={card.id} className="bg-gray-900 border border-gray-800 rounded-2xl overflow-hidden group hover:border-gray-700 transition flex flex-col justify-between">
                     <div className="relative bg-gray-950 aspect-[2.5/3.5] overflow-hidden">
                       <CardImage
-                        src={card.imageUrl || `https://api.scryfall.com/cards/named?exact=${encodeURIComponent(card.name)}&format=image`}
+                        cardId={card.id}
+                        cardName={card.name}
+                        setCode={card.setCode}
+                        src={card.imageUrl}
                         alt={card.name}
                         className="absolute inset-0 w-full h-full group-hover:scale-105 transition duration-300"
                       />
@@ -1604,7 +1775,10 @@ export default function App() {
                       <div key={card.id} className="bg-gray-900 border border-gray-800 rounded-2xl overflow-hidden flex flex-col justify-between">
                         <div className="relative bg-gray-950 aspect-[2.5/3.5] overflow-hidden">
                           <CardImage
-                            src={card.imageUrl || `https://api.scryfall.com/cards/named?exact=${encodeURIComponent(card.name)}&format=image`}
+                            cardId={card.id}
+                            cardName={card.name}
+                            setCode={card.setCode}
+                            src={card.imageUrl}
                             alt={card.name}
                             className="absolute inset-0 w-full h-full"
                           />
