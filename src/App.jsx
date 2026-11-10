@@ -102,7 +102,12 @@ try {
   const stored = localStorage.getItem('scryfall_cdn_cache_v1');
   if (stored) {
     const parsed = JSON.parse(stored);
-    Object.entries(parsed).forEach(([k, v]) => scryfallCdnCache.set(k, v));
+    Object.entries(parsed).forEach(([k, v]) => {
+      // Exclude previous fallback errors from cache so they get retried
+      if (v && !v.includes('back.jpg')) {
+        scryfallCdnCache.set(k, v);
+      }
+    });
   }
 } catch (e) {}
 
@@ -115,7 +120,7 @@ const debouncedSaveCdnCache = () => {
       const obj = {};
       let count = 0;
       for (const [k, v] of scryfallCdnCache.entries()) {
-        if (count++ > 2000) break;
+        if (count++ > 2500) break;
         obj[k] = v;
       }
       localStorage.setItem('scryfall_cdn_cache_v1', JSON.stringify(obj));
@@ -123,16 +128,17 @@ const debouncedSaveCdnCache = () => {
   }, 1000);
 };
 
+// Rate-limited FIFO queue with polite 150ms delay between calls & 429 backoff
 class ScryfallRateLimitedQueue {
   constructor() {
     this.queue = [];
     this.isProcessing = false;
-    this.delayMs = 100; // Scryfall requested 50-100ms spacing between calls
+    this.delayMs = 150; // Polite 150ms delay between Scryfall API calls
   }
 
   enqueue(cardName, setCode, onResolved) {
-    const cleanName = (cardName || '').trim();
-    const cleanSet = (setCode || '').trim().toLowerCase();
+    const cleanName = (cardName || '').replace(/^"|"$/g, '').trim();
+    const cleanSet = (setCode || '').replace(/[^a-zA-Z0-9]/g, '').trim().toLowerCase();
     const cacheKey = `${cleanName.toLowerCase()}_${cleanSet}`;
 
     // 1. Instant Cache Hit (0ms, 0 API calls)
@@ -171,44 +177,65 @@ class ScryfallRateLimitedQueue {
         queryUrl += `&set=${encodeURIComponent(cleanSet)}`;
       }
 
-      const res = await fetch(queryUrl);
+      let res = await fetch(queryUrl);
 
-      // Handle 429 Too Many Requests with automatic backoff
+      // 1. If 429 Too Many Requests, back off 2.5s and retry this item
       if (res.status === 429) {
-        console.warn(`Scryfall 429 rate limit hit for "${cleanName}". Backing off 1.8s...`);
-        this.queue.unshift(item); // Re-queue at the front
-        setTimeout(() => this.processNext(), 1800);
+        console.warn(`Scryfall 429 rate limit hit for "${cleanName}". Backing off 2.5s...`);
+        this.queue.unshift(item);
+        setTimeout(() => this.processNext(), 2500);
         return;
+      }
+
+      // 2. If 404 with set code, fallback to card name alone
+      if (res.status === 404 && cleanSet && cleanSet !== 'csv') {
+        res = await fetch(`https://api.scryfall.com/cards/named?exact=${encodeURIComponent(cleanName)}`);
+        if (res.status === 429) {
+          this.queue.unshift(item);
+          setTimeout(() => this.processNext(), 2500);
+          return;
+        }
+      }
+
+      // 3. If still 404, fallback to fuzzy search
+      if (res.status === 404) {
+        res = await fetch(`https://api.scryfall.com/cards/named?fuzzy=${encodeURIComponent(cleanName)}`);
+        if (res.status === 429) {
+          this.queue.unshift(item);
+          setTimeout(() => this.processNext(), 2500);
+          return;
+        }
       }
 
       if (res.ok) {
         const data = await res.json();
         const directCdnUrl = data.image_uris?.normal || 
                              data.card_faces?.[0]?.image_uris?.normal || 
+                             data.image_uris?.large || 
                              'https://cards.scryfall.io/back.jpg';
         
-        scryfallCdnCache.set(cacheKey, directCdnUrl);
-        debouncedSaveCdnCache();
+        if (directCdnUrl && !directCdnUrl.includes('back.jpg')) {
+          scryfallCdnCache.set(cacheKey, directCdnUrl);
+          debouncedSaveCdnCache();
+        }
         onResolved(directCdnUrl);
       } else {
-        // Fallback to Scryfall card back so it doesn't stay broken
-        const fallback = 'https://cards.scryfall.io/back.jpg';
-        scryfallCdnCache.set(cacheKey, fallback);
-        onResolved(fallback);
+        // Fallback without poisoning cache
+        onResolved('https://cards.scryfall.io/back.jpg');
       }
     } catch (err) {
       console.warn(`Failed fetching CDN image for "${cleanName}":`, err);
       onResolved('https://cards.scryfall.io/back.jpg');
     }
 
-    // Strict 100ms pause between API calls prevents 429 throttling
+    // Strict 150ms delay between calls prevents Scryfall throttling
     setTimeout(() => this.processNext(), this.delayMs);
   }
 }
 
 const scryfallQueue = new ScryfallRateLimitedQueue();
 
-// Lazy-loading card image with CDN resolution, rate-limited queue & Firestore auto-healing
+// Lazy-loading card image with settle delay, rate-limited queue, retry backoff & Firestore auto-healing
 const CardImage = ({ 
   src, 
   alt, 
@@ -220,15 +247,17 @@ const CardImage = ({
 }) => {
   const imgRef = useRef(null);
   const [loaded, setLoaded] = useState(false);
-  const [error, setError] = useState(false);
+  const [errorCount, setErrorCount] = useState(0);
   const [inView, setInView] = useState(false);
+  const inViewTimerRef = useRef(null);
+  const retryTimerRef = useRef(null);
 
-  const cleanName = cardName || alt || '';
-  const cleanSet = setCode || '';
-  const cacheKey = `${cleanName.toLowerCase().trim()}_${cleanSet.toLowerCase().trim()}`;
+  const cleanName = (cardName || alt || '').replace(/^"|"$/g, '').trim();
+  const cleanSet = (setCode || '').replace(/[^a-zA-Z0-9]/g, '').trim().toLowerCase();
+  const cacheKey = `${cleanName.toLowerCase()}_${cleanSet}`;
 
   // Initial source evaluation:
-  // If already a direct cards.scryfall.io link, use it immediately with zero queueing!
+  // If already a direct cards.scryfall.io link, use it immediately
   const [resolvedUrl, setResolvedUrl] = useState(() => {
     if (src && !src.includes('api.scryfall.com')) {
       return src;
@@ -239,24 +268,38 @@ const CardImage = ({
     return null;
   });
 
-  // IntersectionObserver to only load cards near viewport
+  // IntersectionObserver for true lazy loading with settle delay:
+  // Cards scrolled past quickly won't trigger unnecessary network requests
   useEffect(() => {
     const el = imgRef.current;
     if (!el) return;
+
     const observer = new IntersectionObserver(
       ([entry]) => {
         if (entry.isIntersecting) {
-          setInView(true);
-          observer.disconnect();
+          // 120ms settle delay so fast scrolling doesn't spam requests
+          inViewTimerRef.current = setTimeout(() => {
+            setInView(true);
+            observer.disconnect();
+          }, 120);
+        } else {
+          if (inViewTimerRef.current) {
+            clearTimeout(inViewTimerRef.current);
+          }
         }
       },
-      { rootMargin: '300px' }
+      { rootMargin: '200px' } // Pre-load 200px before scrolling into viewport
     );
+
     observer.observe(el);
-    return () => observer.disconnect();
+    return () => {
+      if (inViewTimerRef.current) clearTimeout(inViewTimerRef.current);
+      if (retryTimerRef.current) clearTimeout(retryTimerRef.current);
+      observer.disconnect();
+    };
   }, []);
 
-  // When card enters view, resolve through the rate-limited queue if not already a direct CDN link
+  // When card enters view, resolve through the rate-limited queue if not already direct CDN
   useEffect(() => {
     if (!inView) return;
 
@@ -277,11 +320,11 @@ const CardImage = ({
       return;
     }
 
-    // Queue request through polite 100ms scheduler
+    // Queue request through polite scheduler with delay
     if (cleanName) {
       scryfallQueue.enqueue(cleanName, cleanSet, (cdnUrl) => {
         setResolvedUrl(cdnUrl);
-        // Auto-heal Firestore in background so future visits never call api.scryfall.com again!
+        // Auto-heal Firestore in background so future visits never call api.scryfall.com again
         if (cardId && cdnUrl.includes('cards.scryfall.io')) {
           updateDoc(doc(db, 'cards', cardId), { imageUrl: cdnUrl }).catch(() => {});
         }
@@ -289,24 +332,56 @@ const CardImage = ({
     }
   }, [inView, src, cleanName, cleanSet, cacheKey, cardId]);
 
-  const finalSrc = error ? fallback : (resolvedUrl || fallback);
+  // Handle image load failure with retry delay
+  const handleImageError = () => {
+    if (errorCount < 2) {
+      // Retry loading after a 1.5s delay
+      retryTimerRef.current = setTimeout(() => {
+        setErrorCount((prev) => prev + 1);
+        setLoaded(false);
+      }, 1500);
+    } else {
+      setErrorCount(99); // Max retries exceeded, will show fallback
+    }
+  };
+
+  const finalSrc = errorCount >= 2 ? fallback : (resolvedUrl || fallback);
 
   return (
-    <div ref={imgRef} className={className} style={{ backgroundColor: '#111' }}>
-      {inView && resolvedUrl ? (
+    <div ref={imgRef} className={className} style={{ backgroundColor: '#0e0f14' }}>
+      {inView && resolvedUrl && errorCount < 2 ? (
         <img
+          key={`${resolvedUrl}-${errorCount}`}
           src={finalSrc}
           alt={alt || cleanName}
+          loading="lazy"
+          decoding="async"
           className="w-full h-full object-cover"
           onLoad={() => setLoaded(true)}
-          onError={() => setError(true)}
-          style={{ opacity: loaded ? 1 : 0, transition: 'opacity 0.3s' }}
+          onError={handleImageError}
+          style={{ 
+            opacity: loaded ? 1 : 0, 
+            transition: 'opacity 0.4s ease-in-out' 
+          }}
         />
       ) : null}
-      {inView && (!loaded || !resolvedUrl) && !error && (
-        <div className="absolute inset-0 flex items-center justify-center">
+
+      {/* Loading placeholder spinner while waiting for image resolution */}
+      {inView && (!loaded || !resolvedUrl) && errorCount < 2 && (
+        <div className="absolute inset-0 flex flex-col items-center justify-center bg-gray-950/80 backdrop-blur-[1px]">
           <div className="w-6 h-6 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin" />
         </div>
+      )}
+
+      {/* Fallback image when max retries exceeded */}
+      {inView && errorCount >= 2 && (
+        <img
+          src={fallback}
+          alt={alt || cleanName}
+          loading="lazy"
+          decoding="async"
+          className="w-full h-full object-cover opacity-80"
+        />
       )}
     </div>
   );
