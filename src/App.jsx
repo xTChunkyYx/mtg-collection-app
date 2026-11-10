@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { initializeApp } from 'firebase/app';
 import { 
   getFirestore, 
@@ -43,7 +43,10 @@ import {
   Edit3,
   X,
   FileSpreadsheet,
-  Loader2
+  Loader2,
+  FolderOpen,
+  FolderPlus,
+  Package
 } from 'lucide-react';
 
 // 1. Firebase Configuration
@@ -90,6 +93,52 @@ const parseSafeNumber = (val, fallback = 0) => {
   const cleaned = String(val).replace(/[^0-9.-]+/g, '');
   const parsed = parseFloat(cleaned);
   return isNaN(parsed) ? fallback : parsed;
+};
+
+// Lazy-loading card image with IntersectionObserver for reliable off-screen loading
+const CardImage = ({ src, alt, className, fallback = 'https://cards.scryfall.io/back.jpg' }) => {
+  const imgRef = useRef(null);
+  const [loaded, setLoaded] = useState(false);
+  const [error, setError] = useState(false);
+  const [inView, setInView] = useState(false);
+
+  useEffect(() => {
+    const el = imgRef.current;
+    if (!el) return;
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (entry.isIntersecting) {
+          setInView(true);
+          observer.disconnect();
+        }
+      },
+      { rootMargin: '200px' }
+    );
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+
+  const imgSrc = error ? fallback : (inView ? src : undefined);
+
+  return (
+    <div ref={imgRef} className={className} style={{ backgroundColor: '#111' }}>
+      {inView && (
+        <img
+          src={imgSrc}
+          alt={alt}
+          className="w-full h-full object-cover"
+          onLoad={() => setLoaded(true)}
+          onError={() => setError(true)}
+          style={{ opacity: loaded ? 1 : 0, transition: 'opacity 0.3s' }}
+        />
+      )}
+      {inView && !loaded && !error && (
+        <div className="absolute inset-0 flex items-center justify-center">
+          <div className="w-6 h-6 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin" />
+        </div>
+      )}
+    </div>
+  );
 };
 
 export default function App() {
@@ -141,7 +190,16 @@ export default function App() {
   const [csvText, setCsvText] = useState('');
   const [importStatus, setImportStatus] = useState('');
   const [isImporting, setIsImporting] = useState(false);
+  const [importProgress, setImportProgress] = useState(0);   // 0-100
+  const [importCurrent, setImportCurrent] = useState(0);
+  const [importTotal, setImportTotal] = useState(0);
   const fileInputRef = useRef(null);
+
+  // Box / Folder State
+  const [importBoxName, setImportBoxName] = useState('');       // box to import into
+  const [newBoxInput, setNewBoxInput] = useState('');           // text field for creating
+  const [selectedBox, setSelectedBox] = useState('ALL');        // collection filter
+  const [isCreatingBox, setIsCreatingBox] = useState(false);    // show create input
 
   // Trade Calculator State
   const [offeredCards, setOfferedCards] = useState([]);
@@ -422,10 +480,14 @@ export default function App() {
     return '';
   };
 
-  const processCsvContent = async (rawText, fileName = '') => {
+  const processCsvContent = async (rawText, fileName = '', boxName = '') => {
     if (!rawText || !rawText.trim() || !user || isImporting) return;
     setIsImporting(true);
-    setImportStatus('Parsing & importing cards into Goober Box...');
+    setImportProgress(0);
+    setImportCurrent(0);
+    setImportTotal(0);
+    const targetBox = boxName.trim() || importBoxName.trim() || '';
+    setImportStatus(`Parsing & importing cards${targetBox ? ` into box "${targetBox}"` : ''}...`);
 
     try {
       const lines = rawText.trim().split(/\r\n|\n/);
@@ -438,6 +500,11 @@ export default function App() {
       
       const startIndex = hasHeaders ? 1 : 0;
       const headers = hasHeaders ? parsedHeaderRow.map(h => h.toLowerCase().trim().replace(/^"|"$/g, '')) : [];
+
+      // Count valid rows first so we can track progress
+      const validLines = lines.slice(startIndex).filter(l => l.trim().length > 0);
+      const totalValid = validLines.length;
+      setImportTotal(totalValid);
 
       for (let i = startIndex; i < lines.length; i++) {
         const line = lines[i].trim();
@@ -490,10 +557,16 @@ export default function App() {
             typeLine: 'Imported Card',
             imageUrl: imageUrl,
             isFoil: isFoilEntry,
+            boxName: targetBox,
             addedAt: new Date().toISOString()
           });
           addedCount++;
         }
+
+        // Update progress after each row
+        const processed = i - startIndex + 1;
+        setImportCurrent(addedCount);
+        setImportProgress(Math.round((processed / Math.max(totalValid, 1)) * 100));
       }
 
       setCsvText('');
@@ -502,13 +575,20 @@ export default function App() {
       }
       
       const sourceLabel = fileName ? `from file "${fileName}"` : 'from pasted CSV text';
-      setImportStatus(`✅ Successfully imported ${addedCount} cards ${sourceLabel}!`);
+      const boxLabel = targetBox ? ` into box "${targetBox}"` : '';
+      setImportStatus(`✅ Successfully imported ${addedCount} cards${boxLabel} ${sourceLabel}!`);
+      setImportProgress(100);
     } catch (err) {
       console.error("CSV Import Error:", err);
       setImportStatus(`❌ Import failed: ${err.message}`);
     } finally {
       setIsImporting(false);
-      setTimeout(() => setImportStatus(''), 6000);
+      setTimeout(() => {
+        setImportStatus('');
+        setImportProgress(0);
+        setImportCurrent(0);
+        setImportTotal(0);
+      }, 6000);
     }
   };
 
@@ -520,10 +600,16 @@ export default function App() {
     const reader = new FileReader();
     reader.onload = async (e) => {
       const text = e.target.result;
-      await processCsvContent(text, file.name);
+      await processCsvContent(text, file.name, importBoxName);
     };
     reader.readAsText(file);
   };
+
+  // Derive unique box names from all cards
+  const allBoxNames = useMemo(() => {
+    const names = cards.map(c => c.boxName || '').filter(Boolean);
+    return [...new Set(names)].sort();
+  }, [cards]);
 
   // Personal Filtered Cards
   const filteredCards = cards.filter((c) => {
@@ -531,7 +617,9 @@ export default function App() {
                           c.setName.toLowerCase().includes(searchTerm.toLowerCase());
     const matchesColor = selectedColor === 'ALL' || (c.colors && c.colors.includes(selectedColor));
     const matchesRarity = selectedRarity === 'ALL' || c.rarity.toLowerCase() === selectedRarity.toLowerCase();
-    return matchesSearch && matchesColor && matchesRarity;
+    const matchesBox = selectedBox === 'ALL' || (c.boxName || '') === selectedBox ||
+                       (selectedBox === '__NONE__' && !c.boxName);
+    return matchesSearch && matchesColor && matchesRarity && matchesBox;
   });
 
   // Personal Metrics
@@ -572,7 +660,7 @@ export default function App() {
   // Authentication View
   if (!user) {
     return (
-      <div className="min-h-screen bg-gray-950 flex items-center justify-center p-4">
+      <div className="min-h-screen w-full bg-gray-950 flex items-center justify-center p-4">
         <div className="max-w-md w-full bg-gray-900 border border-gray-800 rounded-2xl p-8 space-y-6">
           <div className="text-center space-y-2">
             <div className="inline-flex p-3 bg-indigo-600 rounded-xl shadow-lg shadow-indigo-500/30 mb-2">
@@ -653,10 +741,10 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen bg-gray-950 text-gray-100 font-sans antialiased">
+    <div className="min-h-screen w-full bg-gray-950 text-gray-100 font-sans antialiased">
       {/* Header */}
       <header className="border-b border-gray-800 bg-gray-900/80 backdrop-blur sticky top-0 z-50">
-        <div className="max-w-7xl mx-auto px-4 py-4 flex flex-col md:flex-row justify-between items-center gap-4">
+        <div className="w-full px-4 sm:px-6 lg:px-8 py-4 flex flex-col md:flex-row justify-between items-center gap-4">
           <div className="flex items-center gap-3">
             <div className="p-2 bg-indigo-600 rounded-lg shadow-lg shadow-indigo-500/30">
               <Layers className="w-6 h-6 text-white" />
@@ -766,7 +854,7 @@ export default function App() {
       )}
 
       {/* Main Content Area */}
-      <main className="max-w-7xl mx-auto px-4 py-8">
+      <main className="w-full px-4 sm:px-6 lg:px-8 py-8">
         
         {/* TAB 1: PERSONAL COLLECTION */}
         {activeTab === 'collection' && (
@@ -841,6 +929,19 @@ export default function App() {
                   <option value="mythic">Mythic</option>
                 </select>
 
+                {/* Box filter */}
+                <select
+                  value={selectedBox}
+                  onChange={(e) => setSelectedBox(e.target.value)}
+                  className="bg-gray-950 border border-gray-800 rounded-xl px-3 py-2 text-sm text-gray-300 focus:outline-none focus:border-indigo-500"
+                >
+                  <option value="ALL">All Boxes</option>
+                  <option value="__NONE__">No Box</option>
+                  {allBoxNames.map(name => (
+                    <option key={name} value={name}>📦 {name}</option>
+                  ))}
+                </select>
+
                 <div className="flex bg-gray-950 p-1 border border-gray-800 rounded-xl">
                   <button
                     onClick={() => setViewMode('grid')}
@@ -875,15 +976,10 @@ export default function App() {
                 {filteredCards.map((card) => (
                   <div key={card.id} className="bg-gray-900 border border-gray-800 rounded-2xl overflow-hidden group hover:border-gray-700 transition flex flex-col justify-between">
                     <div className="relative bg-gray-950 aspect-[2.5/3.5] overflow-hidden">
-                      <img 
-                        src={card.imageUrl || `https://api.scryfall.com/cards/named?exact=${encodeURIComponent(card.name)}&format=image`} 
-                        alt={card.name} 
-                        className="w-full h-full object-cover group-hover:scale-105 transition duration-300"
-                        loading="lazy"
-                        onError={(e) => {
-                          e.target.onerror = null;
-                          e.target.src = 'https://cards.scryfall.io/back.jpg';
-                        }}
+                      <CardImage
+                        src={card.imageUrl || `https://api.scryfall.com/cards/named?exact=${encodeURIComponent(card.name)}&format=image`}
+                        alt={card.name}
+                        className="absolute inset-0 w-full h-full group-hover:scale-105 transition duration-300"
                       />
                       <div className="absolute top-2 right-2 bg-gray-950/80 backdrop-blur text-xs px-2 py-1 rounded-lg font-bold border border-gray-700 text-indigo-300">
                         x{card.quantity}
@@ -899,6 +995,11 @@ export default function App() {
                       <div>
                         <h3 className="text-sm font-bold text-white line-clamp-1">{card.name}</h3>
                         <p className="text-xs text-gray-400">{card.setName}</p>
+                        {card.boxName && (
+                          <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-amber-300 bg-amber-400/10 border border-amber-400/20 px-1.5 py-0.5 rounded mt-0.5">
+                            <Package className="w-2.5 h-2.5" />{card.boxName}
+                          </span>
+                        )}
                       </div>
 
                       <div className="flex justify-between items-center text-xs">
@@ -923,6 +1024,7 @@ export default function App() {
                     <tr>
                       <th className="p-3">Card Name</th>
                       <th className="p-3">Set</th>
+                      <th className="p-3">Box</th>
                       <th className="p-3">Finish</th>
                       <th className="p-3">Qty</th>
                       <th className="p-3">Price</th>
@@ -934,6 +1036,13 @@ export default function App() {
                       <tr key={card.id} className="hover:bg-gray-800/50">
                         <td className="p-3 font-semibold text-white">{card.name}</td>
                         <td className="p-3 text-gray-400">{card.setName}</td>
+                        <td className="p-3">
+                          {card.boxName ? (
+                            <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-amber-300 bg-amber-400/10 border border-amber-400/20 px-1.5 py-0.5 rounded">
+                              <Package className="w-2.5 h-2.5" />{card.boxName}
+                            </span>
+                          ) : <span className="text-gray-600">—</span>}
+                        </td>
                         <td className="p-3">
                           {card.isFoil ? (
                             <span className="text-[10px] bg-amber-400/20 text-amber-300 font-bold px-1.5 py-0.5 rounded border border-amber-400/30">FOIL</span>
@@ -1073,13 +1182,110 @@ export default function App() {
             </div>
 
             {/* CSV File Upload & Text Import Section */}
-            <div className="bg-gray-900 border border-gray-800 p-6 rounded-2xl space-y-4">
-              <h2 className="text-lg font-bold text-white flex items-center gap-2">
-                <Upload className="w-5 h-5 text-indigo-400" /> Import CSV File / Binder
-              </h2>
-              <p className="text-xs text-gray-400">
-                Select a CSV file from your computer or paste text content. Works with Daveon's binder exports, Moxfield, ManaBox, or Archidekt CSVs.
-              </p>
+            <div className="bg-gray-900 border border-gray-800 p-6 rounded-2xl space-y-5">
+              <div>
+                <h2 className="text-lg font-bold text-white flex items-center gap-2">
+                  <Upload className="w-5 h-5 text-indigo-400" /> Import CSV File / Binder
+                </h2>
+                <p className="text-xs text-gray-400 mt-1">
+                  Select a CSV file from your computer or paste text content. Works with Daveon's binder exports, Moxfield, ManaBox, or Archidekt CSVs.
+                </p>
+              </div>
+
+              {/* ── Box / Folder Selector ── */}
+              <div className="bg-gray-950 border border-gray-800 rounded-xl p-4 space-y-3">
+                <div className="flex items-center gap-2 text-sm font-semibold text-white">
+                  <FolderOpen className="w-4 h-4 text-amber-400" />
+                  Import into Box
+                  <span className="text-xs text-gray-500 font-normal ml-1">— group cards by physical box or binder</span>
+                </div>
+
+                <div className="flex flex-wrap gap-2">
+                  {/* No box */}
+                  <button
+                    onClick={() => { setImportBoxName(''); setIsCreatingBox(false); }}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition ${
+                      importBoxName === '' && !isCreatingBox
+                        ? 'bg-indigo-600 border-indigo-500 text-white'
+                        : 'bg-gray-900 border-gray-700 text-gray-400 hover:border-gray-500 hover:text-white'
+                    }`}
+                  >
+                    No Box (General)
+                  </button>
+
+                  {/* Existing box names derived from collection */}
+                  {allBoxNames.map(name => (
+                    <button
+                      key={name}
+                      onClick={() => { setImportBoxName(name); setIsCreatingBox(false); }}
+                      className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition ${
+                        importBoxName === name && !isCreatingBox
+                          ? 'bg-amber-500/20 border-amber-400/60 text-amber-300'
+                          : 'bg-gray-900 border-gray-700 text-gray-400 hover:border-amber-400/40 hover:text-amber-300'
+                      }`}
+                    >
+                      <Package className="w-3 h-3" />{name}
+                    </button>
+                  ))}
+
+                  {/* Create new box */}
+                  <button
+                    onClick={() => { setIsCreatingBox(true); setImportBoxName(''); }}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition ${
+                      isCreatingBox
+                        ? 'bg-emerald-600/20 border-emerald-400/60 text-emerald-300'
+                        : 'bg-gray-900 border-dashed border-gray-600 text-gray-500 hover:border-emerald-400/40 hover:text-emerald-400'
+                    }`}
+                  >
+                    <FolderPlus className="w-3 h-3" /> New Box
+                  </button>
+                </div>
+
+                {/* New box name input */}
+                {isCreatingBox && (
+                  <div className="flex gap-2 mt-1">
+                    <input
+                      type="text"
+                      placeholder="e.g. Commander Box 1, Red Deck Box, Bulk Binder…"
+                      value={newBoxInput}
+                      onChange={(e) => setNewBoxInput(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' && newBoxInput.trim()) {
+                          setImportBoxName(newBoxInput.trim());
+                          setIsCreatingBox(false);
+                        }
+                      }}
+                      className="flex-1 bg-gray-900 border border-gray-700 rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none focus:border-emerald-500 placeholder-gray-600"
+                      autoFocus
+                    />
+                    <button
+                      onClick={() => {
+                        if (newBoxInput.trim()) {
+                          setImportBoxName(newBoxInput.trim());
+                          setIsCreatingBox(false);
+                        }
+                      }}
+                      disabled={!newBoxInput.trim()}
+                      className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold rounded-lg transition disabled:opacity-40"
+                    >
+                      Confirm
+                    </button>
+                    <button
+                      onClick={() => { setIsCreatingBox(false); setNewBoxInput(''); }}
+                      className="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 text-gray-400 text-xs rounded-lg transition"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                )}
+
+                {importBoxName && (
+                  <p className="text-xs text-amber-300/80 flex items-center gap-1 mt-1">
+                    <Package className="w-3 h-3" />
+                    Cards will be imported into box: <strong className="text-amber-300">"{importBoxName}"</strong>
+                  </p>
+                )}
+              </div>
 
               {/* CSV File Select Button */}
               <div className={`border-2 border-dashed transition rounded-xl p-6 text-center bg-gray-950/60 ${
@@ -1109,6 +1315,31 @@ export default function App() {
                 </label>
               </div>
 
+              {/* Progress Bar — shown while importing */}
+              {isImporting && importTotal > 0 && (
+                <div className="space-y-2">
+                  <div className="flex justify-between items-center text-xs">
+                    <span className="text-indigo-300 font-medium flex items-center gap-1.5">
+                      <Loader2 className="w-3 h-3 animate-spin" /> Importing cards…
+                    </span>
+                    <span className="text-gray-400 font-mono">
+                      {importCurrent} / {importTotal} &nbsp;({importProgress}%)
+                    </span>
+                  </div>
+                  <div className="w-full bg-gray-800 rounded-full h-3 overflow-hidden">
+                    <div
+                      className="bg-gradient-to-r from-indigo-500 via-purple-500 to-indigo-400 h-3 rounded-full transition-all duration-200"
+                      style={{ width: `${importProgress}%` }}
+                    />
+                  </div>
+                  {importBoxName && (
+                    <p className="text-[11px] text-amber-300/70 flex items-center gap-1">
+                      <Package className="w-3 h-3" /> Importing into box: "{importBoxName}"
+                    </p>
+                  )}
+                </div>
+              )}
+
               <div className="relative flex items-center justify-center my-2">
                 <div className="border-t border-gray-800 w-full"></div>
                 <span className="bg-gray-900 px-3 text-xs text-gray-500 uppercase font-bold absolute">OR PASTE RAW CSV</span>
@@ -1117,7 +1348,7 @@ export default function App() {
               <textarea
                 rows="6"
                 disabled={isImporting}
-                placeholder="Count, Name, Edition, Price, Foil&#10;1, Black Lotus, Unlimited Edition, 12500, false&#10;4, Sol Ring, Commander Masters, 3.50, true"
+                placeholder={"Count, Name, Edition, Price, Foil\n1, Black Lotus, Unlimited Edition, 12500, false\n4, Sol Ring, Commander Masters, 3.50, true"}
                 value={csvText}
                 onChange={(e) => setCsvText(e.target.value)}
                 className="w-full bg-gray-950 border border-gray-800 rounded-xl p-3 text-xs font-mono text-gray-200 focus:outline-none focus:border-indigo-500 disabled:opacity-50"
@@ -1372,15 +1603,10 @@ export default function App() {
                     {filteredCommunityPlayerCards.map((card) => (
                       <div key={card.id} className="bg-gray-900 border border-gray-800 rounded-2xl overflow-hidden flex flex-col justify-between">
                         <div className="relative bg-gray-950 aspect-[2.5/3.5] overflow-hidden">
-                          <img 
-                            src={card.imageUrl || `https://api.scryfall.com/cards/named?exact=${encodeURIComponent(card.name)}&format=image`} 
-                            alt={card.name} 
-                            className="w-full h-full object-cover"
-                            loading="lazy"
-                            onError={(e) => {
-                              e.target.onerror = null;
-                              e.target.src = 'https://cards.scryfall.io/back.jpg';
-                            }}
+                          <CardImage
+                            src={card.imageUrl || `https://api.scryfall.com/cards/named?exact=${encodeURIComponent(card.name)}&format=image`}
+                            alt={card.name}
+                            className="absolute inset-0 w-full h-full"
                           />
                           <div className="absolute top-2 right-2 bg-gray-950/80 backdrop-blur text-xs px-2 py-1 rounded-lg font-bold border border-gray-700 text-indigo-300">
                             x{card.quantity}
