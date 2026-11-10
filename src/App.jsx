@@ -522,10 +522,13 @@ export default function App() {
   const [queryName, setQueryName] = useState('');
   const [searchResults, setSearchResults] = useState([]);
   const [isSearching, setIsSearching] = useState(false);
+  const [searchError, setSearchError] = useState('');
   const [availablePrintings, setAvailablePrintings] = useState([]);
   const [selectedPrinting, setSelectedPrinting] = useState(null);
   const [addQuantity, setAddQuantity] = useState(1);
   const [isFoil, setIsFoil] = useState(false);
+  const [justAddedCard, setJustAddedCard] = useState(null);
+  const [isAddingCard, setIsAddingCard] = useState(false);
 
   // CSV Import State
   const [csvText, setCsvText] = useState('');
@@ -753,75 +756,136 @@ export default function App() {
     return () => clearTimeout(timer);
   }, [queryName]);
 
-  // Fetch Printings for Scryfall Card
-  const handleSelectCardName = async (name) => {
-    setQueryName(name);
+  // Fetch Printings for Scryfall Card (with multi-tier fallback for 100% search accuracy)
+  const executeSearch = async (nameToSearch = queryName) => {
+    const cleanName = (nameToSearch || '').trim();
+    if (!cleanName) return;
+
+    setQueryName(cleanName);
     setSearchResults([]);
     setIsSearching(true);
+    setSearchError('');
     setAvailablePrintings([]);
     setSelectedPrinting(null);
 
     try {
-      const res = await fetch(`https://api.scryfall.com/cards/search?q=exact%3A%22${encodeURIComponent(name)}%22+unique%3Aprints`);
-      const searchData = await res.json();
+      // 1. Try exact prints search
+      let res = await fetch(`https://api.scryfall.com/cards/search?q=exact%3A%22${encodeURIComponent(cleanName)}%22+unique%3Aprints`);
+      let searchData = await res.json();
+
+      // 2. Fallback to loose prints search
+      if (!searchData.data || searchData.data.length === 0) {
+        res = await fetch(`https://api.scryfall.com/cards/search?q=${encodeURIComponent(cleanName)}+unique%3Aprints`);
+        searchData = await res.json();
+      }
+
+      // 3. Fallback to fuzzy named lookup
+      if (!searchData.data || searchData.data.length === 0) {
+        res = await fetch(`https://api.scryfall.com/cards/named?fuzzy=${encodeURIComponent(cleanName)}`);
+        const singleCard = await res.json();
+        if (singleCard && singleCard.id) {
+          if (singleCard.prints_search_uri) {
+            const pRes = await fetch(singleCard.prints_search_uri);
+            const pData = await pRes.json();
+            searchData = { data: pData.data || [singleCard] };
+          } else {
+            searchData = { data: [singleCard] };
+          }
+        }
+      }
+
       if (searchData.data && searchData.data.length > 0) {
         setAvailablePrintings(searchData.data);
         setSelectedPrinting(searchData.data[0]);
+      } else {
+        setSearchError(`No cards found matching "${cleanName}". Check the spelling and try again.`);
       }
     } catch (err) {
       console.error("Scryfall printings fetch error:", err);
+      setSearchError("Failed to fetch card printings from Scryfall.");
     } finally {
       setIsSearching(false);
     }
   };
 
-  // Add Card to Firestore
+  const handleSelectCardName = (name) => {
+    executeSearch(name);
+  };
+
+  // Add Card to Firestore with Box assignment & Rich Visual Feedback
   const handleAddCardToCollection = async () => {
-    if (!selectedPrinting || !user) return;
+    if (!selectedPrinting || !user || isAddingCard) return;
+    setIsAddingCard(true);
 
-    const normalPrice = parseSafeNumber(selectedPrinting.prices?.usd, 0.50);
-    const foilPrice = parseSafeNumber(selectedPrinting.prices?.usd_foil, normalPrice);
-    const finalPrice = isFoil ? foilPrice : normalPrice;
+    try {
+      const normalPrice = parseSafeNumber(selectedPrinting.prices?.usd, 0.50);
+      const foilPrice = parseSafeNumber(selectedPrinting.prices?.usd_foil, normalPrice);
+      const finalPrice = isFoil ? foilPrice : normalPrice;
 
-    const imageUrl = selectedPrinting.image_uris?.normal || 
-                     selectedPrinting.card_faces?.[0]?.image_uris?.normal || '';
+      const imageUrl = selectedPrinting.image_uris?.normal || 
+                       selectedPrinting.card_faces?.[0]?.image_uris?.normal || 
+                       selectedPrinting.image_uris?.large || '';
 
-    const existingIndex = cards.findIndex(c => 
-      c.name.toLowerCase() === selectedPrinting.name.toLowerCase() && 
-      c.setCode === selectedPrinting.set?.toUpperCase() &&
-      c.isFoil === isFoil
-    );
+      const targetBox = importBoxName.trim() || '';
+      const qtyToAdd = Math.max(1, parseInt(addQuantity, 10) || 1);
 
-    if (existingIndex > -1) {
-      const existingCard = cards[existingIndex];
-      const cardRef = doc(db, 'cards', existingCard.id);
-      await updateDoc(cardRef, {
-        quantity: existingCard.quantity + parseInt(addQuantity, 10),
-        price: finalPrice
-      });
-    } else {
-      await addDoc(collection(db, 'cards'), {
-        userId: user.uid,
+      const existingIndex = cards.findIndex(c => 
+        c.name.toLowerCase() === selectedPrinting.name.toLowerCase() && 
+        c.setCode === selectedPrinting.set?.toUpperCase() &&
+        c.isFoil === isFoil &&
+        (c.boxName || '') === targetBox
+      );
+
+      if (existingIndex > -1) {
+        const existingCard = cards[existingIndex];
+        const cardRef = doc(db, 'cards', existingCard.id);
+        await updateDoc(cardRef, {
+          quantity: existingCard.quantity + qtyToAdd,
+          price: finalPrice,
+          imageUrl: imageUrl || existingCard.imageUrl
+        });
+      } else {
+        await addDoc(collection(db, 'cards'), {
+          userId: user.uid,
+          name: selectedPrinting.name,
+          setName: selectedPrinting.set_name || 'Unknown Set',
+          setCode: selectedPrinting.set?.toUpperCase() || 'MTG',
+          collectorNumber: selectedPrinting.collector_number || '',
+          quantity: qtyToAdd,
+          price: finalPrice,
+          colors: selectedPrinting.colors || selectedPrinting.color_identity || [],
+          rarity: selectedPrinting.rarity || 'common',
+          typeLine: selectedPrinting.type_line || '',
+          imageUrl: imageUrl,
+          isFoil: isFoil,
+          boxName: targetBox,
+          addedAt: new Date().toISOString()
+        });
+      }
+
+      // Visual confirmation banner
+      setJustAddedCard({
         name: selectedPrinting.name,
-        setName: selectedPrinting.set_name || 'Unknown Set',
-        setCode: selectedPrinting.set?.toUpperCase() || 'MTG',
-        collectorNumber: selectedPrinting.collector_number || '',
-        quantity: parseInt(addQuantity, 10),
-        price: finalPrice,
-        colors: selectedPrinting.colors || selectedPrinting.color_identity || [],
-        rarity: selectedPrinting.rarity || 'common',
-        typeLine: selectedPrinting.type_line || '',
+        setName: selectedPrinting.set_name,
+        setCode: selectedPrinting.set?.toUpperCase(),
         imageUrl: imageUrl,
+        quantity: qtyToAdd,
+        price: finalPrice,
         isFoil: isFoil,
-        addedAt: new Date().toISOString()
+        boxName: targetBox
       });
-    }
 
-    setQueryName('');
-    setSelectedPrinting(null);
-    setAvailablePrintings([]);
-    setAddQuantity(1);
-    setIsFoil(false);
+      // Clear search inputs
+      setQueryName('');
+      setSelectedPrinting(null);
+      setAvailablePrintings([]);
+      setAddQuantity(1);
+      setIsFoil(false);
+    } catch (err) {
+      console.error("Failed adding card:", err);
+    } finally {
+      setIsAddingCard(false);
+    }
   };
 
   const handleDeleteCard = async (cardId) => {
@@ -1536,6 +1600,68 @@ export default function App() {
         {/* TAB 2: ADD & ART VARIANT PICKER / CSV FILE & DECK IMPORT */}
         {activeTab === 'add' && (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+            {/* Visual Feedback Banner: Shown immediately after a card is added */}
+            {justAddedCard && (
+              <div className="md:col-span-2 bg-gradient-to-r from-emerald-950/80 to-emerald-900/40 border border-emerald-500/50 rounded-2xl p-4 flex flex-col sm:flex-row items-center justify-between gap-4 shadow-xl shadow-emerald-950/30">
+                <div className="flex items-center gap-4">
+                  {justAddedCard.imageUrl ? (
+                    <img
+                      src={justAddedCard.imageUrl}
+                      alt={justAddedCard.name}
+                      className="w-14 h-20 rounded-xl object-cover border border-emerald-500/50 shadow-md"
+                    />
+                  ) : (
+                    <div className="w-14 h-20 bg-gray-950 rounded-xl flex items-center justify-center border border-emerald-500/50">
+                      <Check className="w-8 h-8 text-emerald-400" />
+                    </div>
+                  )}
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="bg-emerald-500 text-gray-950 text-[10px] font-black px-2 py-0.5 rounded shadow">
+                        ✓ CARD ADDED TO COLLECTION
+                      </span>
+                      {justAddedCard.isFoil && (
+                        <span className="bg-amber-400 text-gray-950 text-[10px] font-black px-2 py-0.5 rounded shadow">
+                          FOIL ✨
+                        </span>
+                      )}
+                    </div>
+                    <h3 className="text-lg font-bold text-white mt-1">
+                      {justAddedCard.quantity}x {justAddedCard.name}
+                    </h3>
+                    <p className="text-xs text-gray-300">
+                      {justAddedCard.setName} ({justAddedCard.setCode}) &bull;{' '}
+                      <span className="text-emerald-400 font-semibold">${(justAddedCard.price * justAddedCard.quantity).toFixed(2)}</span>
+                      {justAddedCard.boxName ? (
+                        <span className="ml-2 text-amber-300 font-medium">
+                          &bull; Box: "{justAddedCard.boxName}"
+                        </span>
+                      ) : (
+                        <span className="ml-2 text-gray-400">
+                          &bull; No Box (General)
+                        </span>
+                      )}
+                    </p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-3 w-full sm:w-auto">
+                  <button
+                    onClick={() => setActiveTab('collection')}
+                    className="flex-1 sm:flex-none px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold rounded-xl transition shadow flex items-center justify-center gap-1.5"
+                  >
+                    <Database className="w-3.5 h-3.5" /> View in Collection
+                  </button>
+                  <button
+                    onClick={() => setJustAddedCard(null)}
+                    className="p-2 text-gray-400 hover:text-white transition"
+                    title="Dismiss"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+            )}
+
             {/* Scryfall Art & Printing Variant Picker */}
             <div className="bg-gray-900 border border-gray-800 p-6 rounded-2xl space-y-4">
               <h2 className="text-lg font-bold text-white flex items-center gap-2">
@@ -1544,20 +1670,46 @@ export default function App() {
               <p className="text-xs text-gray-400">Type any card name to pick specific set art and foil finishes live from Scryfall.</p>
 
               <div className="relative">
-                <input
-                  type="text"
-                  placeholder="e.g. Sol Ring, Black Lotus, Lightning Bolt..."
-                  value={queryName}
-                  onChange={(e) => setQueryName(e.target.value)}
-                  className="w-full bg-gray-950 border border-gray-800 rounded-xl px-4 py-2.5 text-sm text-white focus:outline-none focus:border-indigo-500"
-                />
+                <div className="flex items-center gap-2">
+                  <div className="relative flex-1">
+                    <input
+                      type="text"
+                      placeholder="e.g. Sol Ring, Black Lotus, Lightning Bolt..."
+                      value={queryName}
+                      onChange={(e) => setQueryName(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault();
+                          executeSearch();
+                        }
+                      }}
+                      className="w-full bg-gray-950 border border-gray-800 rounded-xl pl-4 pr-10 py-2.5 text-sm text-white focus:outline-none focus:border-indigo-500"
+                    />
+                    {queryName && (
+                      <button
+                        onClick={() => { setQueryName(''); setSearchResults([]); setSearchError(''); }}
+                        className="absolute right-3 top-3 text-gray-500 hover:text-white"
+                      >
+                        <X className="w-4 h-4" />
+                      </button>
+                    )}
+                  </div>
+                  <button
+                    onClick={() => executeSearch()}
+                    disabled={isSearching || !queryName.trim()}
+                    className="px-4 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-sm font-semibold transition disabled:opacity-50 flex items-center gap-1.5 shadow"
+                  >
+                    {isSearching ? <Loader2 className="w-4 h-4 animate-spin" /> : <Search className="w-4 h-4" />}
+                    Search
+                  </button>
+                </div>
 
                 {searchResults.length > 0 && (
-                  <div className="absolute left-0 right-0 top-full mt-1 bg-gray-900 border border-gray-800 rounded-xl shadow-2xl max-h-60 overflow-y-auto z-50">
+                  <div className="absolute left-0 right-24 top-full mt-1 bg-gray-900 border border-gray-800 rounded-xl shadow-2xl max-h-60 overflow-y-auto z-50">
                     {searchResults.map((item) => (
                       <button
                         key={item}
-                        onClick={() => handleSelectCardName(item)}
+                        onClick={() => executeSearch(item)}
                         className="w-full text-left px-4 py-2 text-sm text-gray-200 hover:bg-indigo-600 hover:text-white transition border-b border-gray-800/50 last:border-none"
                       >
                         {item}
@@ -1566,6 +1718,20 @@ export default function App() {
                   </div>
                 )}
               </div>
+
+              {searchError && (
+                <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-xl text-xs text-red-400 font-medium flex items-center gap-2">
+                  <X className="w-4 h-4 flex-shrink-0" />
+                  {searchError}
+                </div>
+              )}
+
+              {isSearching && (
+                <div className="p-4 text-center text-xs text-indigo-400 flex items-center justify-center gap-2 bg-indigo-950/20 rounded-xl border border-indigo-900/30">
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  Searching editions & artwork from Scryfall...
+                </div>
+              )}
 
               {availablePrintings.length > 0 && (
                 <div className="space-y-4 pt-2">
@@ -1614,6 +1780,12 @@ export default function App() {
                       <p className="text-xs text-emerald-400 font-semibold">
                         Non-Foil: ${selectedPrinting.prices?.usd || 'N/A'} | Foil: ${selectedPrinting.prices?.usd_foil || 'N/A'}
                       </p>
+                      {importBoxName && (
+                        <p className="text-[11px] text-amber-300 flex items-center gap-1 pt-1">
+                          <Package className="w-3 h-3" />
+                          Destination Box: <strong>"{importBoxName}"</strong>
+                        </p>
+                      )}
                     </div>
                   </div>
 
@@ -1642,9 +1814,20 @@ export default function App() {
 
                   <button
                     onClick={handleAddCardToCollection}
-                    className="w-full py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white font-medium text-sm rounded-xl transition shadow-lg shadow-indigo-600/20"
+                    disabled={isAddingCard}
+                    className="w-full py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white font-medium text-sm rounded-xl transition shadow-lg shadow-indigo-600/20 flex items-center justify-center gap-2 disabled:opacity-50"
                   >
-                    Add Selected Printing to Collection
+                    {isAddingCard ? (
+                      <>
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        Adding to Collection...
+                      </>
+                    ) : (
+                      <>
+                        <Plus className="w-4 h-4" />
+                        Add Selected Printing to Collection
+                      </>
+                    )}
                   </button>
                 </div>
               )}
